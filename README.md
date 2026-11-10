@@ -5,8 +5,11 @@ application PDF** from your `Bewerbungen` folder, reads the **company name from
 the file name**, finds the **matching existing Gmail draft**, and – after you
 confirm – **attaches the PDF to that draft**.
 
-It **never sends e-mails**. The only change it ever makes in Gmail is adding an
-attachment to a draft that already exists, and only after you confirm it.
+It can **check automatically** for new PDFs (no need to click Scan) and,
+if you switch it on, **send the e-mail automatically** – but only when exactly
+one draft clearly matches. Everything unclear waits for you. With sending
+switched off (the default), the only change it makes in Gmail is adding an
+attachment to an existing draft after you confirm it.
 
 ![Main window](docs/screenshots/single.png)
 
@@ -39,9 +42,9 @@ attachment to a draft that already exists, and only after you confirm it.
 
 | Guarantee | How it is enforced |
 |---|---|
-| Never sends e-mails | The code never calls a send endpoint. In addition, every Gmail call goes through an allowlist (`SafeGmailService`) that only permits *list drafts*, *read draft*, *update draft* and *read profile*; `send`, `create`, `delete` and the whole `messages` API are blocked at runtime before any request is made. Automated tests check this statically and at runtime. |
-| Never deletes drafts or creates new drafts | Same allowlist; the existing draft is updated in place (`users.drafts.update`). |
-| Never modifies a draft without explicit confirmation | Every attachment requires a final confirmation dialog that shows the PDF, company, recipient, subject, date, existing attachments and the new attachment. |
+| Sends only when you enabled it | Sending is off by default. When enabled, a draft is sent only **after** the PDF was attached and verified in Gmail. Automatic sending (without a click) happens only when there is exactly one strong match, the company came from the file name and the draft has a recipient. A send is never retried (no double sending) and the same PDF is never sent twice. Sending exists in exactly one function; automated tests check this. |
+| Never deletes drafts or creates new drafts | Every Gmail call goes through an allowlist (`SafeGmailService`) that only permits *read profile*, *list/read/update drafts* and *send an existing draft*; `create`, `delete` and the whole `messages` API are blocked before any request is made. |
+| Never modifies a draft without approval | Manual attachments need a final confirmation dialog showing PDF, company, recipient, subject, date, existing and new attachments. The only exception is automatic sending, which you switch on yourself. |
 | Never silently chooses between ambiguous drafts | If several drafts match, nothing is pre-selected; you must pick one. The newest draft is never preferred because it is the newest. |
 | Weak / uncertain matches never lead to an attachment | Partial names or similar spellings are shown for reference only. To use such a draft you must select it manually and confirm an extra warning. |
 | Keeps the draft's text, formatting and attachments | The complete original message is downloaded, one MIME part is added, and before uploading the new message is compared part-by-part with the original. Any difference aborts. After the upload the draft is read back and checked again. |
@@ -49,7 +52,7 @@ attachment to a draft that already exists, and only after you confirm it.
 | Processes only one PDF per run | A scan selects exactly one PDF; there is no batch mode. |
 | Never modifies your local PDFs | Files are only read (to hash and attach them). |
 | Never asks for or stores your Gmail password | Sign-in uses Google's OAuth browser flow. The token is stored encrypted with Windows DPAPI. |
-| Dry-run mode | Shows exactly what would happen (including the full safety check) without changing Gmail. It is **on by default** on first start. |
+| Dry-run mode | Shows exactly what would happen (including the full safety check) without changing Gmail or sending anything. It is **on by default** on first start and overrides automatic sending. |
 
 ## 2. How it works
 
@@ -209,9 +212,10 @@ allows reading **and** updating drafts – Google offers no "drafts only"
 permission. According to Google's API description it allows exactly: reading
 the account address, listing/reading/creating/updating/deleting/sending
 drafts, and sending messages. It does **not** allow reading your inbox or
-any other e-mail. Of these operations the application uses only *read
-address*, *list drafts*, *read draft* and *update draft*; creating, deleting
-and sending are blocked by its built-in allowlist (see
+any other e-mail. Of these operations the application uses *read address*,
+*list drafts*, *read draft*, *update draft* and – only if you enable sending –
+*send draft*; creating and deleting drafts and sending other messages are
+blocked by its built-in allowlist (see
 [Safety guarantees](#1-safety-guarantees)).
 
 ## 6. Connecting Gmail
@@ -305,6 +309,32 @@ first (for example if the draft for the newest PDF does not exist yet).
 > Tip: close the draft in Gmail (browser or phone) before attaching.
 > Otherwise Gmail's autosave of the open draft could overwrite the change.
 
+### Automatic checking and sending
+
+Two checkboxes in the main window control this (both are saved):
+
+* **Check automatically for new PDFs** (on by default): while Gmail is
+  connected, the folder is checked every 10 seconds. A new PDF is processed
+  as if you had clicked *Scan*, and the window comes to the front so you can
+  confirm. Each PDF is picked up automatically only once per session.
+* **Send e-mail automatically after attaching** (off by default; asks for
+  confirmation when switched on): when a new PDF has **exactly one strong
+  match** – company read from the file name, no other draft mentioning the
+  company, draft has a recipient – the PDF is attached and the e-mail is
+  **sent without asking**. In every other case the app stops and waits for
+  you, and the banner says why. With this option on, your manual
+  confirmations also send the e-mail (the button then reads *Confirm, Attach
+  and Send*).
+
+If sending fails, the PDF stays attached to the draft and you are told to
+send it yourself. If the connection breaks while sending, the app does not
+retry (it could send twice) – check your Gmail *Sent* folder. The history
+shows *Attached and SENT*, *Attached, NOT sent* or *Attached, send unclear*.
+
+Recommended first use: switch on automatic sending **with dry-run mode on**,
+save a test PDF and check in the history that it says the PDF *would be
+attached and sent* to the right draft.
+
 ## 10. How drafts are matched
 
 The company name is compared with each draft after normalisation: case,
@@ -382,6 +412,8 @@ details (path, SHA-256 hash, messages).
 | Status | Meaning | PDF picked again automatically? |
 |---|---|---|
 | Success | Gmail confirmed the update and the draft was verified | No |
+| Attached and SENT | Attached, verified and sent | No |
+| Attached, NOT sent / send unclear | Attached, but sending failed or the result is unclear – check Gmail | No |
 | Already attached (no change) | The PDF was found in the draft already | No |
 | Dry run (no change) | Preview only | Yes |
 | Failed | Gmail was not changed (error shown in details) | Yes |
@@ -510,8 +542,9 @@ runtime checks that no send/create/delete call exists.
 * By default up to 500 drafts are read per scan (`matching.max_drafts` in
   `config.json`). The first scan reads every draft; later scans in the same
   session only read drafts that changed.
-* The `gmail.compose` permission technically includes sending; Google offers
-  no narrower permission for editing drafts. The application never sends.
+* Automatic sending trusts a strong match. If two different applications go
+  to the same company, make sure only one draft exists at a time, or leave
+  automatic sending off.
 * Self-built `.exe` files are unsigned and may trigger SmartScreen warnings.
 
 The screenshots in this document were rendered with sample data; fonts look

@@ -6,11 +6,14 @@ What this module can do - and nothing more:
     * read the account's e-mail address (users.getProfile)
     * list drafts, read drafts (users.drafts.list / users.drafts.get)
     * replace the content of an EXISTING draft (users.drafts.update)
+    * send an EXISTING draft (users.drafts.send) - only through
+      GmailClient.send_draft, which is called only by the attachment
+      manager after the PDF was attached and verified
 
 Safety: every Gmail call goes through SafeGmailService, an allowlist wrapper
-around the API client.  Sending (drafts.send, messages.send), creating
-drafts, deleting drafts and every other endpoint raise
-ForbiddenOperationError before any request is made.
+around the API client.  Creating drafts, deleting drafts, messages.send and
+every other endpoint raise ForbiddenOperationError before any request is
+made.
 
 Passwords are never requested or stored.  Only the OAuth token is stored,
 encrypted with Windows DPAPI (see secure_storage.py).
@@ -113,8 +116,8 @@ class _Allowlist:
         if name not in allowed:
             raise ForbiddenOperationError(
                 f"Blocked: Gmail operation '{path}.{name}' is not permitted. "
-                "This application never sends e-mails, never creates drafts and never "
-                "deletes drafts."
+                "This application only reads, updates and sends existing drafts; it never "
+                "creates or deletes drafts."
             )
         attr = getattr(object.__getattribute__(self, "_target"), name)
         wrapper = allowed[name]
@@ -128,7 +131,7 @@ def _wrap_drafts_factory(drafts_factory: Callable[[], Any]) -> Callable[[], Any]
     def drafts() -> Any:
         return _Allowlist(
             drafts_factory(),
-            {"list": None, "list_next": None, "get": None, "update": None},
+            {"list": None, "list_next": None, "get": None, "update": None, "send": None},
             "users().drafts()",
         )
     return drafts
@@ -148,10 +151,10 @@ class SafeGmailService(_Allowlist):
     """Wraps a googleapiclient Gmail service.  Allowed calls:
 
         users().getProfile
-        users().drafts().list / list_next / get / update
+        users().drafts().list / list_next / get / update / send
 
-    Everything else - in particular drafts().send, drafts().create,
-    drafts().delete and the whole messages() resource - is blocked."""
+    Everything else - in particular drafts().create, drafts().delete and the
+    whole messages() resource (incl. messages.send) - is blocked."""
 
     def __init__(self, service: Any):
         super().__init__(service, {"users": _wrap_users_factory}, "service")
@@ -830,7 +833,7 @@ class GmailClient:
 
         Uses users.drafts.update (HTTP PUT) with a message/rfc822 media
         upload.  The draft id stays the same; Gmail assigns a new message id.
-        This never sends the e-mail and never creates a new draft."""
+        This does not send the e-mail and never creates a new draft."""
         if not draft_id:
             raise ValueError("draft_id is required")
         media = MediaIoBaseUpload(
@@ -847,4 +850,23 @@ class GmailClient:
             raise GmailApiError("Gmail did not confirm the update of the expected draft.")
         log.info("Gmail confirmed update of draft %s (new message id %s)",
                  draft_id, (response.get("message") or {}).get("id"))
+        return response
+
+    def send_draft(self, draft_id: str) -> dict[str, Any]:
+        """Send the EXISTING draft *draft_id* (users.drafts.send).
+
+        Never retried automatically: if the connection breaks after Gmail
+        accepted the request, a retry could send the application twice."""
+        if not draft_id:
+            raise ValueError("draft_id is required")
+        request = self._service.users().drafts().send(userId="me", body={"id": draft_id})
+        saved_retries = self.num_retries
+        self.num_retries = 0
+        try:
+            response = self._execute(request, "send draft")
+        finally:
+            self.num_retries = saved_retries
+        if not isinstance(response, dict) or not response.get("id"):
+            raise GmailApiError("Gmail did not confirm that the e-mail was sent.")
+        log.info("Gmail sent draft %s as message %s", draft_id, response.get("id"))
         return response

@@ -25,8 +25,13 @@ operation.  After Gmail confirms the update the draft is read again and
 checked (the new PDF must be present, existing attachments must still be
 there).  Only then is the history record marked "success".
 
-Never: send, create a new draft, delete a draft, remove attachments, or
-modify the local PDF file.
+Sending (optional, execute(send=True)): only after the attachment was
+confirmed by Gmail AND verified by reading the draft back.  A send is never
+retried automatically (a retry after a timeout could send twice), and a PDF
+that was already sent is never sent again.
+
+Never: create a new draft, delete a draft, remove attachments, or modify the
+local PDF file.
 """
 
 from __future__ import annotations
@@ -45,6 +50,9 @@ from pathlib import Path
 
 from config import GMAIL_ATTACHMENT_LIMIT, GMAIL_RAW_UPLOAD_LIMIT
 from database import (
+    SEND_FAILED,
+    SEND_SENT,
+    SEND_UNKNOWN,
     Database,
     STATUS_ALREADY_ATTACHED,
     STATUS_DRY_RUN,
@@ -285,10 +293,15 @@ class AttachResult:
     message: str
     record_id: int | None = None
     new_message_id: str | None = None
+    send_status: str | None = None   # None = sending not requested; else SEND_*
 
     @property
     def success(self) -> bool:
         return self.status == STATUS_SUCCESS
+
+    @property
+    def sent(self) -> bool:
+        return self.send_status == SEND_SENT
 
 
 # --------------------------------------------------------------------------
@@ -373,25 +386,75 @@ class AttachmentManager:
             draft_recipients=plan.draft.recipients_display(),
         )
 
-    # -- step 2: execute (after explicit confirmation) ------------------
-    def execute(self, plan: AttachPlan, *, dry_run: bool) -> AttachResult:
-        """Upload the prepared message to the existing draft.
+    # -- step 2: execute (after confirmation / automatic approval) ------
+    def execute(self, plan: AttachPlan, *, dry_run: bool, send: bool = False) -> AttachResult:
+        """Upload the prepared message to the existing draft and, if *send*
+        is True, send the draft - but only after the attachment was
+        confirmed by Gmail and verified.
 
-        With dry_run=True nothing is sent to Gmail; the result of the full
-        preparation (including the local preservation check) is recorded."""
+        With dry_run=True nothing is changed or sent in Gmail; the result of
+        the full preparation (including the local preservation check) is
+        recorded."""
         if dry_run:
             record_id = self.db.start_operation(
                 **self._history_fields(plan), status=STATUS_DRY_RUN, finished=True,
                 error_message="Dry run - Gmail was not modified.",
             )
+            action = "attached and SENT" if send else "attached"
             return AttachResult(
                 STATUS_DRY_RUN,
-                f"Dry run complete: '{plan.pdf.name}' WOULD be attached to the draft "
-                f"'{plan.draft.subject or '(no subject)'}'. All safety checks passed "
-                f"(original body and {len(plan.existing_attachments)} existing attachment(s) "
-                "preserved). Gmail was NOT modified.",
+                f"Dry run complete: '{plan.pdf.name}' WOULD be {action} to the draft "
+                f"'{plan.draft.subject or '(no subject)'}' ({plan.draft.recipients_display()}). "
+                f"All safety checks passed (original body and {len(plan.existing_attachments)} "
+                "existing attachment(s) preserved). Gmail was NOT modified and nothing was sent.",
                 record_id,
             )
+        result = self._attach(plan)
+        if send and result.success:
+            result = self._send(plan, result)
+        return result
+
+    def _send(self, plan: AttachPlan, attached: AttachResult) -> AttachResult:
+        """Send the draft after a verified attachment.  Never retried."""
+        record_id = attached.record_id
+        recipients = plan.draft.recipients_display()
+
+        def done(status: str, message: str, message_id: str | None = None, note: str | None = None) -> AttachResult:
+            self.db.set_send_result(record_id, status, message_id=message_id, note=note or message)
+            return AttachResult(STATUS_SUCCESS, message, record_id, attached.new_message_id, status)
+
+        if not plan.draft.to:
+            return done(SEND_FAILED, "The PDF was attached, but the draft has no recipient, so it was "
+                                     "NOT sent. Add the recipient in Gmail and send it yourself.")
+        if self.db.was_sent(plan.pdf.sha256):
+            return done(SEND_FAILED, "The PDF was attached, but an e-mail with this exact PDF was already "
+                                     "sent before, so it was NOT sent again.")
+        try:
+            response = self.gmail.send_draft(plan.draft.draft_id)
+        except GmailNetworkError as exc:
+            return done(SEND_UNKNOWN, f"The PDF was attached, but the connection broke while sending "
+                                      f"({exc}). Check your Gmail 'Sent' folder - the app does NOT retry, "
+                                      "to avoid sending the application twice.")
+        except GmailApiError as exc:
+            if exc.status is not None and exc.status >= 500:
+                return done(SEND_UNKNOWN, f"The PDF was attached, but Gmail reported a server error while "
+                                          f"sending ({exc}). Check your 'Sent' folder - not retried.")
+            return done(SEND_FAILED, f"The PDF was attached, but Gmail refused to send it ({exc}). "
+                                     "The draft with the PDF is still in Gmail - send it yourself.")
+        except GmailError as exc:
+            return done(SEND_FAILED, f"The PDF was attached, but sending failed ({exc}). "
+                                     "The draft with the PDF is still in Gmail - send it yourself.")
+        except Exception as exc:  # unexpected: we cannot know whether it was sent
+            log.exception("Unexpected error while sending draft")
+            return done(SEND_UNKNOWN, f"The PDF was attached, but an unexpected error occurred while "
+                                      f"sending ({exc}). Check your 'Sent' folder - not retried.")
+        message_id = response.get("id")
+        return done(SEND_SENT, f"Attached '{plan.pdf.name}' and SENT the e-mail "
+                               f"'{plan.draft.subject or '(no subject)'}' to {recipients}.",
+                    message_id=message_id, note="E-mail sent.")
+
+    def _attach(self, plan: AttachPlan) -> AttachResult:
+        """Attach the PDF to the draft (no sending)."""
 
         # Pre-flight checks immediately before writing.
         try:

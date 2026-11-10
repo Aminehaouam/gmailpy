@@ -38,6 +38,8 @@ from attachment_manager import (
 )
 from config import APP_NAME, APP_VERSION, Config
 from database import (
+    SEND_FAILED,
+    SEND_SENT,
     Database,
     HistoryRecord,
     INCOMPLETE_STATUSES,
@@ -328,13 +330,18 @@ class ConfirmAttachDialog(_ModalDialog):
     """Final confirmation listing everything that will happen."""
 
     def __init__(self, parent: tk.Misc, plan: AttachPlan, match: DraftMatch | None,
-                 dry_run: bool, manual: bool, fonts: dict):
-        super().__init__(parent, "Dry run - preview only" if dry_run else "Confirm attachment")
+                 dry_run: bool, manual: bool, fonts: dict, send: bool = False):
+        super().__init__(parent, "Dry run - preview only" if dry_run else
+                         ("Confirm attachment and sending" if send else "Confirm attachment"))
         frame = ttk.Frame(self, style="Card.TFrame", padding=20)
         frame.pack(fill="both", expand=True)
 
-        heading = ("Dry run: check what WOULD happen (Gmail is not modified)"
-                   if dry_run else "Attach this PDF to the Gmail draft?")
+        if dry_run:
+            heading = "Dry run: check what WOULD happen (Gmail is not modified)"
+        elif send:
+            heading = "Attach this PDF and SEND the e-mail now?"
+        else:
+            heading = "Attach this PDF to the Gmail draft?"
         ttk.Label(frame, text=heading, style="Card.TLabel", font=fonts["section"]).grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
 
@@ -358,8 +365,14 @@ class ConfirmAttachDialog(_ModalDialog):
             ttk.Label(frame, text=value, style="CardValue.TLabel", wraplength=560, justify="left").grid(
                 row=index, column=1, sticky="nw", pady=3)
 
-        notes = ["Only the attachment is added. The e-mail will NOT be sent.",
-                 "The text, formatting and existing attachments of the draft stay unchanged."]
+        if send and not dry_run:
+            notes = ["The PDF is added and then the e-mail is SENT immediately to the recipient above.",
+                     "A sent e-mail cannot be recalled."]
+        elif send:
+            notes = ["Dry run: nothing is attached and nothing is sent."]
+        else:
+            notes = ["Only the attachment is added. The e-mail will NOT be sent."]
+        notes.append("The text, formatting and existing attachments of the draft stay unchanged.")
         if not dry_run:
             notes.append("Tip: close this draft in Gmail (browser/app) first, otherwise Gmail's "
                          "autosave could overwrite the change.")
@@ -375,7 +388,8 @@ class ConfirmAttachDialog(_ModalDialog):
         buttons = ttk.Frame(frame, style="Card.TFrame")
         buttons.grid(row=len(rows) + 2, column=0, columnspan=2, sticky="e")
         ttk.Button(buttons, text="Go back", command=self.cancel).pack(side="right")
-        confirm_text = "Run dry run (no changes)" if dry_run else "Attach PDF to draft"
+        confirm_text = ("Run dry run (no changes)" if dry_run else
+                        ("Attach PDF and send e-mail" if send else "Attach PDF to draft"))
         confirm = ttk.Button(buttons, text=confirm_text, style="Success.TButton", command=self._confirm)
         confirm.pack(side="right", padx=(0, 8))
         frame.columnconfigure(1, weight=1)
@@ -612,6 +626,20 @@ class SettingsDialog(_ModalDialog):
 GmailFactory = Callable[..., GmailClient]
 
 
+def _modal(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Marks a method that opens a dialog, so the automatic check waits."""
+    import functools
+
+    @functools.wraps(method)
+    def wrapper(self: "App", *args: Any, **kwargs: Any) -> Any:
+        self._modal_depth += 1
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._modal_depth -= 1
+    return wrapper
+
+
 class App(tk.Tk):
     POLL_MS = 50
 
@@ -653,6 +681,10 @@ class App(tk.Tk):
         self.last_result: AttachResult | None = None
         self._tree_items: dict[str, DraftMatch] = {}
         self._history_items: dict[str, HistoryRecord] = {}
+        # Automatic checking
+        self._auto_flow = False          # current PDF was found by the automatic check
+        self._auto_seen: set[str] = set()  # PDFs (SHA-256) already shown automatically
+        self._modal_depth = 0            # >0 while a dialog is open
 
         self.title(f"{APP_NAME} {APP_VERSION}")
         self.geometry("1220x840")
@@ -664,6 +696,8 @@ class App(tk.Tk):
         self.dry_run_var = tk.BooleanVar(value=True if force_dry_run else config.dry_run)
         self.show_dry_runs_var = tk.BooleanVar(value=True)
         self.folder_var = tk.StringVar(value=str(config.watch_folder))
+        self.auto_check_var = tk.BooleanVar(value=config.auto_check)
+        self.auto_send_var = tk.BooleanVar(value=config.auto_send)
 
         self._build_menu()
         self._build_header()
@@ -673,6 +707,7 @@ class App(tk.Tk):
         self._update_dry_run_ui()
         self.refresh_history()
         self.after(self.POLL_MS, self._poll)
+        self.after(self.config_obj.auto_check_interval_ms, self._auto_tick)
 
         incomplete = self.db.list_incomplete()
         if incomplete:
@@ -720,7 +755,7 @@ class App(tk.Tk):
         left.pack(side="left", fill="x", expand=True)
         ttk.Label(left, text=APP_NAME, style="HeaderTitle.TLabel").pack(anchor="w")
         ttk.Label(left, text="Attaches your newest application PDF to the matching Gmail draft. "
-                             "It never sends e-mails.", style="HeaderSub.TLabel").pack(anchor="w", pady=(2, 0))
+                             "Sending only if you enable it.", style="HeaderSub.TLabel").pack(anchor="w", pady=(2, 0))
 
     def _card(self, parent: tk.Misc, title: str) -> ttk.Labelframe:
         return ttk.Labelframe(parent, text=title, style="Card.TLabelframe")
@@ -768,6 +803,16 @@ class App(tk.Tk):
         self.dry_run_check.pack(side="right")
         if self.force_dry_run:
             self.dry_run_check.state(["disabled"])
+        auto_row = ttk.Frame(setup, style="Card.TFrame")
+        auto_row.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        self.auto_check_check = ttk.Checkbutton(
+            auto_row, text="Check automatically for new PDFs (no need to click Scan)",
+            variable=self.auto_check_var, style="Card.TCheckbutton", command=self._on_auto_toggled)
+        self.auto_check_check.pack(side="left")
+        self.auto_send_check = ttk.Checkbutton(
+            auto_row, text="Send e-mail automatically after attaching (only for one clear match)",
+            variable=self.auto_send_var, style="Card.TCheckbutton", command=self._on_auto_send_toggled)
+        self.auto_send_check.pack(side="right")
 
         # 2. PDF card
         pdf_card = self._card(tab, "2  Application PDF")
@@ -998,35 +1043,46 @@ class App(tk.Tk):
         self.banner.configure(style=f"Banner{kind.title()}.TLabel", text=f"{icon}  {text}" if text else "")
 
     # Overridable interaction methods (tests replace these) -------------
+    @_modal
     def show_info(self, message: str, title: str = APP_NAME) -> None:
         messagebox.showinfo(title, message, parent=self)
 
+    @_modal
     def show_warning(self, message: str, title: str = APP_NAME) -> None:
         messagebox.showwarning(title, message, parent=self)
 
+    @_modal
     def show_error(self, message: str, title: str = APP_NAME) -> None:
         messagebox.showerror(title, message, parent=self)
 
+    @_modal
     def ask_yes_no(self, message: str, title: str = APP_NAME, warning: bool = False) -> bool:
         icon = messagebox.WARNING if warning else messagebox.QUESTION
         return bool(messagebox.askyesno(title, message, parent=self, icon=icon))
 
+    @_modal
     def ask_company(self, filename: str, explanation: str, initial: str) -> str | None:
         return CompanyDialog(self, filename, explanation, initial).show()
 
+    @_modal
     def ask_confirm_plan(self, plan: AttachPlan, match: DraftMatch | None, manual: bool) -> bool:
-        dialog = ConfirmAttachDialog(self, plan, match, self.dry_run_active, manual, self.fonts)
+        dialog = ConfirmAttachDialog(self, plan, match, self.dry_run_active, manual, self.fonts,
+                                     send=self.send_enabled)
         return bool(dialog.show())
 
+    @_modal
     def ask_pick_draft(self, matches: list[DraftMatch]) -> DraftMatch | None:
         return DraftPickerDialog(self, matches, self.rejected_draft_ids, self.company or "").show()
 
+    @_modal
     def ask_pick_pdf(self, candidates: list) -> Path | None:
         return PdfPickerDialog(self, candidates).show()
 
+    @_modal
     def ask_directory(self, initial: str) -> str:
         return filedialog.askdirectory(parent=self, initialdir=initial, title="Select the Bewerbungen folder")
 
+    @_modal
     def ask_credentials_file(self) -> str:
         return filedialog.askopenfilename(
             parent=self, title="Select the OAuth client JSON file (Desktop app)",
@@ -1039,10 +1095,41 @@ class App(tk.Tk):
     def dry_run_active(self) -> bool:
         return self.force_dry_run or bool(self.dry_run_var.get())
 
+    @property
+    def send_enabled(self) -> bool:
+        return bool(self.auto_send_var.get())
+
+    def _save_config(self) -> None:
+        try:
+            self.config_obj.save()
+        except OSError as exc:
+            log.warning("Could not save settings: %s", exc)
+
+    def _on_auto_toggled(self) -> None:
+        self.config_obj.auto_check = bool(self.auto_check_var.get())
+        self._save_config()
+        log.info("Automatic checking %s", "enabled" if self.config_obj.auto_check else "disabled")
+
+    def _on_auto_send_toggled(self) -> None:
+        if self.auto_send_var.get() and not self.ask_yes_no(
+                "Enable automatic sending?\n\n"
+                "When the app finds exactly ONE clear (strong) matching draft for a new PDF, it will "
+                "attach the PDF and SEND the e-mail immediately, without asking.\n\n"
+                "Ambiguous or uncertain matches still wait for you. A sent e-mail cannot be recalled. "
+                "While dry-run mode is on, nothing is sent.", title="Automatic sending", warning=True):
+            self.auto_send_var.set(False)
+        self.config_obj.auto_send = bool(self.auto_send_var.get())
+        self._save_config()
+        log.info("Automatic sending %s", "enabled" if self.config_obj.auto_send else "disabled")
+        self._update_dry_run_ui()
+
     def _update_dry_run_ui(self) -> None:
         if self.dry_run_active:
             self.mode_pill.configure(text="DRY-RUN: Gmail is not modified", style="PillDry.TLabel")
             self.confirm_button.configure(text="Confirm (Dry Run)")
+        elif self.send_enabled:
+            self.mode_pill.configure(text="LIVE: attach AND SEND automatically", style="PillLive.TLabel")
+            self.confirm_button.configure(text="Confirm, Attach and Send")
         else:
             self.mode_pill.configure(text="LIVE: drafts will be updated", style="PillLive.TLabel")
             self.confirm_button.configure(text="Confirm and Attach")
@@ -1104,6 +1191,7 @@ class App(tk.Tk):
         self.action_hint.configure(text=hint)
 
     def _reset_workflow(self, keep_status: bool = False) -> None:
+        self._auto_flow = False
         self.current_pdf = None
         self.parse_result = None
         self.company = None
@@ -1177,6 +1265,7 @@ class App(tk.Tk):
         log.info("Bewerbungen folder set to %s", folder)
         self._reset_workflow()
 
+    @_modal
     def open_settings(self) -> None:
         if self.busy:
             return
@@ -1323,8 +1412,9 @@ class App(tk.Tk):
         self._set_status(result.message)
         self._select_pdf(result.selected, notes)
 
-    def _select_pdf(self, pdf: PdfFile, notes: list[str]) -> None:
+    def _select_pdf(self, pdf: PdfFile, notes: list[str], auto: bool = False) -> None:
         self.current_pdf = pdf
+        self._auto_flow = auto
         self.rejected_draft_ids = set()
         parser = FilenameParser(self.config_obj.filename_parser)
         self.parse_result = parser.parse(pdf.name)
@@ -1437,6 +1527,8 @@ class App(tk.Tk):
         self._set_banner(kind, outcome.message + suffix)
         self._set_status(f"{len(self.drafts)} draft(s) checked for '{self.company}'.")
         log.info("Matching '%s': %s", self.company, outcome.status)
+        if self._auto_flow:
+            self._continue_automatically()
 
     def _populate_candidates(self) -> None:
         self._clear_candidates()
@@ -1563,9 +1655,7 @@ class App(tk.Tk):
                 log.info("Final confirmation declined - nothing was attached")
                 self._set_status("Not confirmed. Nothing was attached.")
                 return
-            dry_run = self.dry_run_active
-            status = "Dry run: checking (Gmail is not modified)..." if dry_run else "Attaching PDF to the draft..."
-            self._run_task(status, lambda: manager.execute(plan, dry_run=dry_run), self._on_attach_result)
+            self._execute_plan(manager, plan)
 
         def on_prepare_error(error: BaseException) -> None:
             if isinstance(error, DuplicateAttachmentError) and error.exact_duplicate:
@@ -1588,17 +1678,130 @@ class App(tk.Tk):
         self._run_task("Reading the draft and preparing the attachment...",
                        lambda: manager.prepare(pdf, company, match.draft), on_prepared, on_prepare_error)
 
+    def _execute_plan(self, manager: AttachmentManager, plan: AttachPlan) -> None:
+        dry_run = self.dry_run_active
+        send = self.send_enabled
+        if dry_run:
+            status = "Dry run: checking (Gmail is not modified)..."
+        else:
+            status = "Attaching PDF and sending the e-mail..." if send else "Attaching PDF to the draft..."
+        self._run_task(status, lambda: manager.execute(plan, dry_run=dry_run, send=send), self._on_attach_result)
+
+    # ------------------------------------------------------------------
+    # Automatic checking / sending
+    # ------------------------------------------------------------------
+    def _auto_tick(self) -> None:
+        """Runs every few seconds: look for a new PDF when nothing else is going on."""
+        try:
+            if (self.auto_check_var.get() and not self.busy and self._modal_depth == 0
+                    and self.gmail is not None and self.current_pdf is None):
+                self._auto_scan()
+        finally:
+            self.after(self.config_obj.auto_check_interval_ms, self._auto_tick)
+
+    def _auto_scan(self) -> None:
+        folder = Path(self.folder_var.get())
+        if not folder.is_dir():
+            return
+        scanner = self._make_scanner()
+        seen = set(self._auto_seen)
+
+        def on_result(result: ScanResult) -> None:
+            if result.selected is None or self.current_pdf is not None:
+                self._set_status(f"Watching {folder} for new PDFs...")
+                return
+            self._auto_seen.add(result.selected.sha256)
+            log.info("Automatic check found %s", result.selected.name)
+            self._select_pdf(result.selected, ["Found automatically."], auto=True)
+
+        def on_error(error: BaseException) -> None:
+            log.warning("Automatic check failed: %s", error)
+
+        self._run_task("Checking for new PDFs...", lambda: scanner.scan(folder, exclude_hashes=seen),
+                       on_result, on_error)
+
+    def _auto_send_blocker(self) -> str | None:
+        """None if the current match may be attached and sent without asking,
+        otherwise the reason why the user must decide."""
+        outcome = self.outcome
+        if outcome is None or outcome.status != SINGLE_STRONG or outcome.proposed is None:
+            return "there is no single clear match"
+        if len(outcome.candidates) != 1:
+            return "other drafts also mention this company"
+        if self.parse_result is None or not self.parse_result.ok or self.company != self.parse_result.company:
+            return "the company name was not read from the file name"
+        if self.rejected_draft_ids or self.manual_match is not None:
+            return "a draft was rejected or selected manually"
+        if self.selected_match is not outcome.proposed:
+            return "a different draft is selected"
+        if not outcome.proposed.draft.to:
+            return "the draft has no recipient"
+        return None
+
+    def _draw_attention(self) -> None:
+        try:
+            self.deiconify()
+            self.lift()
+            self.attributes("-topmost", True)
+            self.after(400, lambda: self.attributes("-topmost", False))
+            self.bell()
+        except tk.TclError:
+            pass
+
+    def _continue_automatically(self) -> None:
+        """Called after an automatically found PDF was matched."""
+        if not self.send_enabled:
+            self._draw_attention()
+            return
+        blocker = self._auto_send_blocker()
+        if blocker is not None:
+            log.info("Not sending automatically: %s", blocker)
+            self._set_banner("warn", (self.outcome.message if self.outcome else "") +
+                             f"\n\nNot sent automatically because {blocker}. Please decide yourself.")
+            self._draw_attention()
+            return
+        match = self.selected_match
+        pdf, company = self.current_pdf, self.company
+        manager = AttachmentManager(self.gmail, self.db)
+        log.info("Automatic attach%s: %s -> draft %s", "" if self.dry_run_active else " and send",
+                 pdf.name, match.draft.draft_id)
+
+        def on_error(error: BaseException) -> None:
+            self._draw_attention()
+            if isinstance(error, DuplicateAttachmentError):
+                self._set_banner("stop", f"{error}\nNothing was sent.")
+                return
+            self._handle_error(error)
+
+        self._run_task("Preparing automatic attachment...",
+                       lambda: manager.prepare(pdf, company, match.draft),
+                       lambda plan: self._execute_plan(manager, plan), on_error)
+
     def _on_attach_result(self, result: AttachResult) -> None:
         self.last_result = result
+        auto = self._auto_flow
         self.refresh_history()
         self._set_status(result.message.splitlines()[0])
-        if result.status == STATUS_SUCCESS:
-            self.show_info(result.message, title="Attached")
+        if result.status == STATUS_SUCCESS and result.send_status in (None, SEND_SENT):
+            if not auto:
+                self.show_info(result.message, title="Sent" if result.sent else "Attached")
             self._reset_workflow(keep_status=True)
-            self._set_banner("ok", result.message + "\n\nClick 'Scan for newest PDF' for the next application.")
+            next_step = ("The next new PDF is picked up automatically." if self.auto_check_var.get()
+                         else "Click 'Scan for newest PDF' for the next application.")
+            self._set_banner("ok", result.message + "\n\n" + next_step)
+        elif result.status == STATUS_SUCCESS:
+            # Attached, but sending failed or its outcome is unclear.
+            self._draw_attention()
+            self.show_warning(result.message, title="E-mail not sent" if result.send_status == SEND_FAILED
+                              else "Please check your Sent folder")
+            self._reset_workflow(keep_status=True)
+            self._set_banner("warn", result.message)
         elif result.status == STATUS_DRY_RUN:
-            self.show_info(result.message + "\n\nTo attach for real, switch off dry-run mode and confirm again.",
-                           title="Dry run")
+            if auto:
+                self._reset_workflow(keep_status=True)  # keep watching for the next PDF
+            else:
+                self.show_info(result.message + "\n\nTo attach for real, switch off dry-run mode and "
+                               "confirm again.", title="Dry run")
             self._set_banner("info", result.message)
         elif result.status == STATUS_UNVERIFIED:
             self.show_warning(result.message, title="Please check the draft")
@@ -1687,14 +1890,17 @@ class App(tk.Tk):
             "3. Click 'Scan for newest PDF'. The newest unprocessed PDF is selected and the company "
             "name is read from the file name.\n"
             "4. The app searches your drafts for the company (subject, recipients, text).\n"
-            "5. Review the proposed draft and confirm. Only the attachment is added - nothing is sent.\n\n"
-            "Dry-run mode shows what would happen without changing Gmail.",
+            "5. Review the proposed draft and confirm.\n\n"
+            "Automatic checking: new PDFs are picked up without clicking Scan.\n"
+            "Automatic sending (optional): if exactly one draft clearly matches, the PDF is attached "
+            "and the e-mail is sent without asking. Unclear matches always wait for you.\n\n"
+            "Dry-run mode shows what would happen without changing Gmail or sending anything.",
             title="How it works")
 
     def _show_about(self) -> None:
         self.show_info(
             f"{APP_NAME} {APP_VERSION}\n\nLocal, free tool that attaches application PDFs to existing "
-            "Gmail drafts using the official Gmail API.\n\nIt never sends e-mails, never deletes drafts "
+            "Gmail drafts using the official Gmail API.\n\nIt sends e-mails only if you enable sending, never deletes drafts "
             f"and never modifies your PDF files.\n\nData folder:\n{self.paths.root}",
             title="About")
 

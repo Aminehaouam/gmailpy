@@ -44,9 +44,11 @@ class Script:
 def make_app(config, db, backend, folder):
     apps = []
 
-    def _make():
+    def _make(auto_check=False):
         from gui import App
         config.watch_folder = folder
+        config.auto_check = auto_check
+        config.auto_send = False
         script = Script()
 
         def factory(paths, token_store, **kwargs):
@@ -308,3 +310,132 @@ def test_dialogs_render_and_settings_save(make_app, backend, make_pdf, config):
     assert settings.result is True
     assert config.filename_parser["job_titles"] == ["Elektroniker", "Mechatroniker", "Elektroniker für Betriebstechnik"]
     assert config.scanner["min_file_age_seconds"] == 5.5
+
+
+def enable_auto(app, *, send, live):
+    app.auto_check_var.set(True)
+    app._on_auto_toggled()
+    app.auto_send_var.set(send)
+    app._on_auto_send_toggled()
+    app.dry_run_var.set(not live)
+    app._on_dry_run_toggled()
+
+
+def auto_tick(app):
+    app._auto_tick()
+    app.wait_until_idle()
+    app.wait_until_idle()  # the scan may chain the draft search and the attachment
+
+
+def test_auto_check_finds_new_pdf_without_scan_click(make_app, backend, make_pdf):
+    target = backend.add_draft(ms.alternative_draft("Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de"))
+    app, _script = make_app()
+    enable_auto(app, send=False, live=True)
+    connect(app)
+    auto_tick(app)
+    assert app.current_pdf is None                      # empty folder: nothing happens
+    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=60)
+    auto_tick(app)
+    assert app.company == "Trompetter"
+    assert app.selected_match.draft.draft_id == target
+    assert backend.method_calls("drafts.update") == []  # without auto-send it waits for the click
+    auto_tick(app)                                      # no new scan while a PDF is pending
+    assert app.current_pdf is not None
+
+
+def test_auto_send_single_strong_match(make_app, backend, make_pdf, db):
+    backend.add_draft(ms.alternative_draft("Bewerbung Siemens", "jobs@siemens.com"))
+    target = backend.add_draft(ms.alternative_draft("Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de"))
+    app, script = make_app()
+    script.answer_yes = True                            # confirms enabling auto-send
+    enable_auto(app, send=True, live=True)
+    connect(app)
+    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=60)
+    auto_tick(app)
+    assert app.last_result is not None and app.last_result.sent, app.last_result
+    assert [s["draft_id"] for s in backend.sent] == [target]
+    assert script.confirms == []                        # no confirmation dialog in auto mode
+    assert app.current_pdf is None                      # ready for the next PDF
+    assert db.list_history()[0].send_status == "sent"
+    # The next tick does not send anything again.
+    auto_tick(app)
+    assert len(backend.sent) == 1
+
+
+def test_auto_send_waits_when_ambiguous(make_app, backend, make_pdf):
+    backend.add_draft(ms.alternative_draft("Bewerbung Trompetter", "jobs@trompetter.de"))
+    backend.add_draft(ms.alternative_draft("Nachfrage Trompetter", "info@trompetter.de"))
+    app, script = make_app()
+    enable_auto(app, send=True, live=True)
+    connect(app)
+    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=60)
+    auto_tick(app)
+    assert app.outcome.status == MULTIPLE
+    assert backend.sent == [] and backend.method_calls("drafts.update") == []
+
+
+def test_auto_send_waits_for_body_only_or_no_match(make_app, backend, make_pdf):
+    backend.add_draft(ms.alternative_draft("Bewerbung als Elektroniker", "info@tb-elektro.de",
+                                           body_plain="Sehr geehrte Damen und Herren der Trompetter GmbH,"))
+    app, _script = make_app()
+    enable_auto(app, send=True, live=True)
+    connect(app)
+    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=60)
+    auto_tick(app)
+    assert app.outcome.status != SINGLE_STRONG
+    assert backend.sent == []
+    assert "Not sent automatically" in app.banner.cget("text")
+
+
+def test_auto_send_requires_company_from_filename(make_app, backend, make_pdf):
+    backend.add_draft(ms.alternative_draft("Bewerbung bei Bosch", "karriere@bosch.de"))
+    make_pdf("Bewerbung_Bosch_final.pdf", age=60)
+    app, script = make_app()
+    enable_auto(app, send=True, live=True)
+    connect(app)
+    script.company = "Bosch"                            # typed by hand
+    auto_tick(app)
+    assert app.outcome.status == SINGLE_STRONG
+    assert backend.sent == []
+
+
+def test_auto_send_in_dry_run_sends_nothing(make_app, backend, make_pdf):
+    target = backend.add_draft(ms.alternative_draft("Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de"))
+    original = backend.raw_of(target)
+    app, _script = make_app()
+    enable_auto(app, send=True, live=False)
+    connect(app)
+    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=60)
+    auto_tick(app)
+    assert app.last_result.status == STATUS_DRY_RUN
+    assert backend.sent == [] and backend.raw_of(target) == original
+    auto_tick(app)                                      # same PDF is not dry-run again and again
+    assert len([r for r in app.db.list_history() if r.status == STATUS_DRY_RUN]) == 1
+
+
+def test_enabling_auto_send_needs_confirmation(make_app):
+    app, script = make_app()
+    script.answer_yes = False
+    app.auto_send_var.set(True)
+    app._on_auto_send_toggled()
+    assert not app.send_enabled
+    assert app.config_obj.auto_send is False
+
+
+def test_manual_confirm_with_send_enabled_sends(make_app, backend, make_pdf):
+    backend.add_draft(ms.alternative_draft("Bewerbung Trompetter", "jobs@trompetter.de"))
+    backend.add_draft(ms.alternative_draft("Nachfrage Trompetter", "info@trompetter.de"))
+    app, script = make_app()
+    enable_auto(app, send=True, live=True)
+    app.auto_check_var.set(False)
+    connect(app)
+    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=60)
+    app.scan_newest()
+    app.wait_until_idle()
+    item = next(iter(app._tree_items))
+    app.tree.selection_set(item)
+    app.update()
+    assert app.confirm_button.cget("text") == "Confirm, Attach and Send"
+    app.confirm_and_attach()
+    app.wait_until_idle()
+    assert len(backend.sent) == 1 and len(script.confirms) == 1

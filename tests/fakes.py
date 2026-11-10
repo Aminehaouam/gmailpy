@@ -10,8 +10,9 @@ draft semantics:
 * drafts.update accepts a message/rfc822 media upload (as the real client
   sends it) or a 'raw' field
 
-Any access to send / create / delete / messages() is recorded and raises,
-so a test fails immediately if the application ever tries it.
+drafts.send removes the draft and records it in backend.sent.  Any access
+to create / delete / messages() is recorded and raises, so a test fails
+immediately if the application ever tries it.
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ class FakeGmailBackend:
         self.fail_before: dict[str, list[BaseException]] = {}
         self.fail_after: dict[str, list[BaseException]] = {}
         self.on_get_raw: Callable[[str], None] | None = None
+        self.sent: list[dict[str, Any]] = []  # drafts that were sent
         self._ids = itertools.count(1)
 
     # -- setup helpers ----------------------------------------------------
@@ -128,6 +130,17 @@ class FakeGmailBackend:
             d["thread_id"] = thread
         return {"id": draft_id, "message": {"id": d["message_id"], "threadId": d["thread_id"],
                                             "labelIds": ["DRAFT"]}}
+
+
+    def send(self, body: dict) -> dict:
+        draft_id = (body or {}).get("id")
+        if draft_id not in self.drafts:
+            raise self._not_found()
+        d = self.drafts.pop(draft_id)
+        self.order.remove(draft_id)
+        n = next(self._ids)
+        self.sent.append({"draft_id": draft_id, "raw": d["raw"], "message_id": f"s-{n:04d}"})
+        return {"id": f"s-{n:04d}", "threadId": d["thread_id"], "labelIds": ["SENT"]}
 
 
 def _payload(part: email.message.EmailMessage, part_id: str) -> dict:
@@ -213,8 +226,12 @@ class _Drafts(_Forbidden):
         return _Request(self.backend, "drafts.update", {"id": id, "body": body, "media_body": media_body},
                         lambda: self.backend.update(id, body, media_body))
 
+    def send(self, userId: str, body: dict) -> _Request:
+        assert userId == "me"
+        return _Request(self.backend, "drafts.send", {"body": body}, lambda: self.backend.send(body))
+
     def __getattr__(self, name: str) -> Any:
-        if name in ("send", "create", "delete"):
+        if name in ("create", "delete"):
             return self._forbid(f"drafts.{name}")
         raise AttributeError(name)
 

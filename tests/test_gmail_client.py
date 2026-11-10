@@ -58,6 +58,7 @@ def error(status, reason="error", message="Error"):
 
 
 def assert_never_sends(http):
+    """For read/update calls: no send, delete or create request is made."""
     for uri, method, _body, _headers in http.request_sequence:
         assert "/send" not in uri, uri
         assert method != "DELETE", uri
@@ -176,6 +177,24 @@ def test_large_update_uses_resumable_upload(monkeypatch):
     assert_never_sends(http)
 
 
+def test_send_draft_posts_to_drafts_send():
+    client, http = make_client([ok({"id": "s-1", "threadId": "t-1", "labelIds": ["SENT"]})])
+    assert client.send_draft("r-1")["id"] == "s-1"
+    (uri, method, body, _headers), = http.request_sequence
+    assert method == "POST" and urlparse(uri).path == "/gmail/v1/users/me/drafts/send"
+    assert json.loads(body) == {"id": "r-1"}
+
+
+def test_send_draft_is_never_retried(monkeypatch):
+    """A retry after a server error could send the application twice."""
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    client, http = make_client([error(503, "backendError"), ok({"id": "s-1"})], num_retries=3)
+    with pytest.raises(GmailApiError):
+        client.send_draft("r-1")
+    assert len(http.request_sequence) == 1
+    assert client.num_retries == 3  # restored for other calls
+
+
 def test_update_must_confirm_same_draft():
     client, _ = make_client([ok({"id": "r-OTHER", "message": {"id": "m-2"}})])
     with pytest.raises(GmailApiError):
@@ -204,7 +223,6 @@ def test_transient_errors_are_retried(monkeypatch):
 
 
 @pytest.mark.parametrize("path", [
-    lambda s: s.users().drafts().send,
     lambda s: s.users().drafts().create,
     lambda s: s.users().drafts().delete,
     lambda s: s.users().messages,
@@ -212,7 +230,7 @@ def test_transient_errors_are_retried(monkeypatch):
     lambda s: s.users().settings,
     lambda s: s.users().labels,
 ])
-def test_safe_service_blocks_everything_but_drafts_read_update(path):
+def test_safe_service_blocks_everything_but_drafts_read_update_send(path):
     http = HttpMockSequence([])  # any real request would fail with IndexError
     service = SafeGmailService(build_from_document(get_static_doc("gmail", "v1"), http=http))
     with pytest.raises(ForbiddenOperationError):
@@ -223,7 +241,9 @@ def test_safe_service_blocks_everything_but_drafts_read_update(path):
 def test_client_wraps_service_in_allowlist():
     client, http = make_client([])
     with pytest.raises(ForbiddenOperationError):
-        client._service.users().drafts().send(userId="me", body={"id": "r-1"}).execute()
+        client._service.users().drafts().create(userId="me", body={}).execute()
+    with pytest.raises(ForbiddenOperationError):
+        client._service.users().messages().send(userId="me", body={}).execute()
     assert http.request_sequence == []
 
 

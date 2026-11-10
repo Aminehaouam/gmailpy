@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 
 APP_NAME = "Bewerbung Attach Assistant"
 APP_ID = "BewerbungAttachAssistant"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 # The only OAuth scope the application requests.
 #
@@ -36,9 +36,10 @@ APP_VERSION = "1.0.0"
 # drafts."  It is the narrowest Google scope that allows reading AND updating
 # drafts (gmail.readonly cannot update drafts, gmail.modify / mail.google.com
 # are far broader).  Google offers no "drafts only" scope, so this scope would
-# technically permit sending - the application itself never calls any send,
-# create or delete endpoint, and gmail_client.SafeGmailService blocks those
-# calls at runtime as a second line of defence.
+# also permit sending; the application sends a draft only when the user
+# enabled sending ("auto_send") and only after the PDF was attached and
+# verified.  Creating/deleting drafts and messages.send stay blocked by
+# gmail_client.SafeGmailService.
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.compose"]
 
 # Gmail limits (bytes).
@@ -181,6 +182,15 @@ DEFAULTS: dict[str, Any] = {
     # Dry-run mode: preview everything, never modify Gmail.  On by default so
     # the first run is always safe; switch it off in the main window.
     "dry_run": True,
+    # Check the folder automatically (every auto_check_interval_seconds while
+    # Gmail is connected) and search the matching draft without clicking Scan.
+    "auto_check": True,
+    "auto_check_interval_seconds": 10.0,
+    # Send the e-mail automatically right after the PDF was attached - ONLY
+    # when there is exactly one strong match (see README).  Ambiguous or weak
+    # matches always wait for the user.  Also makes confirmed manual
+    # attachments send the e-mail.
+    "auto_send": False,
     "scanner": {
         # Files modified more recently than this are treated as "still being
         # written" and skipped.
@@ -311,6 +321,26 @@ class Config:
     @dry_run.setter
     def dry_run(self, value: bool) -> None:
         self.data["dry_run"] = bool(value)
+
+    @property
+    def auto_check(self) -> bool:
+        return bool(self.data.get("auto_check", True))
+
+    @auto_check.setter
+    def auto_check(self, value: bool) -> None:
+        self.data["auto_check"] = bool(value)
+
+    @property
+    def auto_send(self) -> bool:
+        return bool(self.data.get("auto_send", False))
+
+    @auto_send.setter
+    def auto_send(self, value: bool) -> None:
+        self.data["auto_send"] = bool(value)
+
+    @property
+    def auto_check_interval_ms(self) -> int:
+        return int(max(3.0, float(self.data.get("auto_check_interval_seconds", 10.0))) * 1000)
 
     @property
     def scanner(self) -> dict[str, Any]:

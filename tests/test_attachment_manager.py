@@ -416,3 +416,88 @@ def test_recovery_network_problem_leaves_records_untouched(backend, manager, db,
     backend.fail_before["drafts.get"] = [ConnectionResetError("offline")]
     manager.recover_interrupted()
     assert db.get(rid).status == STATUS_IN_PROGRESS
+
+
+# --------------------------------------------------------------------------
+# Sending after attaching
+# --------------------------------------------------------------------------
+
+def test_attach_without_send_never_sends(backend, gmail, manager, pdf_file):
+    draft_id, _ = add_target_draft(backend)
+    result = manager.execute(manager.prepare(pdf_file, "Trompetter", gmail.get_draft_info(draft_id)), dry_run=False)
+    assert result.success and result.send_status is None
+    assert backend.sent == [] and backend.method_calls("drafts.send") == []
+
+
+def test_attach_and_send(backend, gmail, manager, db, pdf_file):
+    draft_id, original = add_target_draft(backend)
+    plan = manager.prepare(pdf_file, "Trompetter", gmail.get_draft_info(draft_id))
+    result = manager.execute(plan, dry_run=False, send=True)
+    assert result.success and result.sent, result.message
+    assert len(backend.sent) == 1
+    sent = backend.sent[0]
+    assert sent["draft_id"] == draft_id
+    assert_preserved(original, sent["raw"], pdf_file.path.read_bytes(), PDF_NAME)  # sent WITH the PDF
+    record = db.get(result.record_id)
+    assert record.send_status == "sent" and record.sent_message_id == sent["message_id"]
+    assert record.status_label == "Attached and SENT"
+    assert db.was_sent(pdf_file.sha256)
+
+
+def test_send_happens_only_after_verified_attachment(backend, gmail, manager, pdf_file):
+    draft_id, _ = add_target_draft(backend)
+    plan = manager.prepare(pdf_file, "Trompetter", gmail.get_draft_info(draft_id))
+    backend.fail_before["drafts.update"] = [http_error(400, "invalidArgument", "bad")]
+    result = manager.execute(plan, dry_run=False, send=True)
+    assert result.status == STATUS_FAILED
+    assert backend.sent == [] and backend.method_calls("drafts.send") == []
+
+
+def test_dry_run_with_send_sends_nothing(backend, gmail, manager, pdf_file):
+    draft_id, original = add_target_draft(backend)
+    plan = manager.prepare(pdf_file, "Trompetter", gmail.get_draft_info(draft_id))
+    result = manager.execute(plan, dry_run=True, send=True)
+    assert result.status == STATUS_DRY_RUN and "WOULD be attached and SENT" in result.message
+    assert backend.sent == [] and backend.raw_of(draft_id) == original
+
+
+def test_send_refused_by_gmail_keeps_attached_draft(backend, gmail, manager, db, pdf_file):
+    draft_id, _ = add_target_draft(backend)
+    plan = manager.prepare(pdf_file, "Trompetter", gmail.get_draft_info(draft_id))
+    backend.fail_before["drafts.send"] = [http_error(400, "invalidArgument", "Invalid To header")]
+    result = manager.execute(plan, dry_run=False, send=True)
+    assert result.success and result.send_status == "failed"
+    assert draft_id in backend.drafts                       # still a draft, with the PDF
+    assert db.get(result.record_id).status_label == "Attached, NOT sent"
+    assert db.find_blocking_record(pdf_file.sha256) is not None  # not processed again
+
+
+def test_send_timeout_is_not_retried(backend, gmail, manager, db, pdf_file):
+    draft_id, _ = add_target_draft(backend)
+    plan = manager.prepare(pdf_file, "Trompetter", gmail.get_draft_info(draft_id))
+    backend.fail_after["drafts.send"] = [socket.timeout("timed out")]  # sent, but no answer
+    result = manager.execute(plan, dry_run=False, send=True)
+    assert result.send_status == "unknown"
+    assert len(backend.method_calls("drafts.send")) == 1    # exactly one attempt
+    assert len(backend.sent) == 1
+    assert "Sent" in result.message
+
+
+def test_draft_without_recipient_is_not_sent(backend, gmail, manager, pdf_file):
+    raw = ms.alternative_draft(SUBJECT, TO).replace(f"To: {TO}\r\n".encode(), b"")
+    draft_id = backend.add_draft(raw)
+    plan = manager.prepare(pdf_file, "Trompetter", gmail.get_draft_info(draft_id))
+    result = manager.execute(plan, dry_run=False, send=True)
+    assert result.success and result.send_status == "failed"
+    assert backend.sent == []
+
+
+def test_same_pdf_is_never_sent_twice(backend, gmail, manager, db, pdf_file):
+    first, _ = add_target_draft(backend)
+    assert manager.execute(manager.prepare(pdf_file, "Trompetter", gmail.get_draft_info(first)),
+                           dry_run=False, send=True).sent
+    second, _ = add_target_draft(backend)
+    result = manager.execute(manager.prepare(pdf_file, "Trompetter", gmail.get_draft_info(second)),
+                             dry_run=False, send=True)
+    assert result.success and result.send_status == "failed"
+    assert len(backend.sent) == 1

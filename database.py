@@ -69,7 +69,12 @@ STATUS_LABELS = {
     STATUS_ALREADY_ATTACHED: "Already attached (no change)",
 }
 
-SCHEMA_VERSION = 1
+# Send outcome (column send_status; NULL = sending was not requested)
+SEND_SENT = "sent"
+SEND_FAILED = "failed"
+SEND_UNKNOWN = "unknown"
+
+SCHEMA_VERSION = 2
 
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS processing_history (
@@ -117,9 +122,18 @@ class HistoryRecord:
     error_message: str | None
     started_at: str
     finished_at: str | None
+    send_status: str | None = None
+    sent_at: str | None = None
+    sent_message_id: str | None = None
 
     @property
     def status_label(self) -> str:
+        if self.status == STATUS_SUCCESS and self.send_status == SEND_SENT:
+            return "Attached and SENT"
+        if self.status == STATUS_SUCCESS and self.send_status == SEND_FAILED:
+            return "Attached, NOT sent"
+        if self.status == STATUS_SUCCESS and self.send_status == SEND_UNKNOWN:
+            return "Attached, send unclear - check Sent"
         return STATUS_LABELS.get(self.status, self.status)
 
     @property
@@ -175,7 +189,11 @@ class Database:
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version == 0:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(processing_history)")}
+            for column in ("send_status", "sent_at", "sent_message_id"):  # schema v2
+                if column not in columns:
+                    conn.execute(f"ALTER TABLE processing_history ADD COLUMN {column} TEXT")
+            if version < SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             elif version > SCHEMA_VERSION:
                 log.warning(
@@ -258,6 +276,34 @@ class Database:
             raise DatabaseError(f"History record #{record_id} does not exist")
         log.info("History record #%s -> %s%s", record_id, status,
                  f" ({error_message})" if error_message else "")
+
+    def set_send_result(self, record_id: int, send_status: str, *, message_id: str | None = None,
+                        note: str | None = None) -> None:
+        """Store the outcome of sending the draft after a successful attachment."""
+        if send_status not in (SEND_SENT, SEND_FAILED, SEND_UNKNOWN):
+            raise ValueError(f"Unknown send status {send_status!r}")
+        record = self.get(record_id)
+        if record is None:
+            raise DatabaseError(f"History record #{record_id} does not exist")
+        details = " ".join(x for x in (record.error_message, note) if x) or None
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE processing_history
+                      SET send_status = ?, sent_at = ?, sent_message_id = ?, error_message = ?
+                    WHERE id = ?""",
+                (send_status, utc_now_iso() if send_status == SEND_SENT else None,
+                 message_id, details, record_id),
+            )
+        log.info("History record #%s: send %s%s", record_id, send_status, f" ({note})" if note else "")
+
+    def was_sent(self, sha256: str) -> bool:
+        """True if an e-mail with this exact PDF was (or may have been) sent."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM processing_history WHERE sha256 = ? AND send_status IN (?, ?) LIMIT 1",
+                (sha256, SEND_SENT, SEND_UNKNOWN),
+            ).fetchone()
+        return row is not None
 
     # -- reading ------------------------------------------------------------
     def get(self, record_id: int) -> HistoryRecord | None:
