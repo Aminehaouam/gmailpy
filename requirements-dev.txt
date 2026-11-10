@@ -1,0 +1,4 @@
+# Development and packaging tools (free and open source)
+-r requirements.txt
+pytest>=7.4
+pyinstaller>=6.0

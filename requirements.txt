@@ -1,0 +1,10 @@
+# Bewerbung Attach Assistant - runtime dependencies
+# All packages are free and open source (Apache License 2.0).
+# Tested with: google-api-python-client 2.201.0, google-auth 2.62.1,
+#              google-auth-oauthlib 1.5.0, google-auth-httplib2 0.4.4
+# Tkinter, sqlite3 and the email/MIME libraries are part of Python itself.
+
+google-api-python-client>=2.100,<3
+google-auth>=2.23,<3
+google-auth-oauthlib>=1.2,<2
+google-auth-httplib2>=0.2,<1

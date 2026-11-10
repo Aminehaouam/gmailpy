@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# PyInstaller
+build/
+dist/
+
+# Secrets and personal data - never commit these
+client_secret*.json
+credentials*.json
+token*.json
+token.bin
+*.sqlite3
+logs/

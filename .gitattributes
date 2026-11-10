@@ -1,0 +1,5 @@
+# Windows batch files need CRLF line endings for cmd.exe
+*.bat text eol=crlf
+*.py text eol=lf
+*.md text eol=lf
+*.png binary
