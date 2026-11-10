@@ -81,6 +81,32 @@ PyInstaller (GPL with bootloader exception) is only needed to build an `.exe`.
 
 ## 4. Installation on Windows
 
+### One-click installation (recommended)
+
+Open a **Command Prompt** (`Win + R`, type `cmd`, Enter), paste this line and
+press Enter:
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Aminehaouam/gmailpy/claude/great-brown-eyx5q1/install.ps1 | iex"
+```
+
+The installer does everything automatically:
+
+1. installs Python 3.12 if no Python 3.11+ is present (no Git needed),
+2. downloads the program to `C:\Users\<USERNAME>\BewerbungAttachAssistant`,
+3. installs all libraries into a private environment,
+4. runs the self-test,
+5. creates a **"Bewerbung Attach Assistant"** icon on the Desktop and in the
+   Start menu.
+
+Alternatively download the ZIP (green **Code** button → *Download ZIP*, on the
+branch shown in the URL above), extract it and double-click **`Install.bat`**.
+Running the installer again later updates the program; your settings, Gmail
+authorization and history are kept. Then continue with
+[section 5](#5-creating-google-oauth-credentials).
+
+The manual steps below are only needed if you prefer to install by hand.
+
 ### 4.1 Install Python
 
 1. Download the current Python 3 installer from <https://www.python.org/downloads/windows/>.
@@ -471,6 +497,7 @@ runtime checks that no send/create/delete call exists.
 | `secure_storage.py` | DPAPI-encrypted token storage |
 | `logging_setup.py` | Log file with secret redaction |
 | `BewerbungAttachAssistant.spec`, `build_exe.bat` | PyInstaller build |
+| `Install.bat`, `install.ps1` | One-click installer (Python, libraries, shortcuts) |
 | `start.bat` | Starts the app from the virtual environment |
 | `tests/` | Automated tests |
 
