@@ -229,10 +229,16 @@ class FileScanner:
         return f"already processed{as_name} on {record.local_time()} ({record.status_label})"
 
     # -- public API -------------------------------------------------------
-    def scan(self, folder: Path, exclude_hashes: Iterable[str] = ()) -> ScanResult:
-        """Select the newest unprocessed PDF (exactly one, or none)."""
+    def scan(self, folder: Path, exclude_hashes: Iterable[str] = (),
+             newer_than: float | None = None) -> ScanResult:
+        """Select the newest unprocessed PDF (exactly one, or none).
+
+        newer_than: only consider files modified after this Unix time (used by
+        the automatic mode so that old files are never processed by surprise)."""
         excluded = set(exclude_hashes)
         entries, skipped = self._list_pdfs(folder)
+        if newer_than:
+            entries = [(p, st) for p, st in entries if st.st_mtime >= newer_than]
         result = ScanResult(folder=folder, selected=None, message="", total_pdfs=len(entries))
         newer_skipped: list[SkippedFile] = []
         now = self._clock()

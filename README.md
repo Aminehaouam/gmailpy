@@ -309,31 +309,50 @@ first (for example if the draft for the newest PDF does not exist yet).
 > Tip: close the draft in Gmail (browser or phone) before attaching.
 > Otherwise Gmail's autosave of the open draft could overwrite the change.
 
-### Automatic checking and sending
+### Fully automatic mode (no clicks)
 
-Two checkboxes in the main window control this (both are saved):
+Tick both checkboxes in the main window (and switch dry-run off):
 
-* **Check automatically for new PDFs** (on by default): while Gmail is
-  connected, the folder is checked every 10 seconds. A new PDF is processed
-  as if you had clicked *Scan*, and the window comes to the front so you can
-  confirm. Each PDF is picked up automatically only once per session.
-* **Send e-mail automatically after attaching** (off by default; asks for
-  confirmation when switched on): when a new PDF has **exactly one strong
-  match** – company read from the file name, no other draft mentioning the
-  company, draft has a recipient – the PDF is attached and the e-mail is
-  **sent without asking**. In every other case the app stops and waits for
-  you, and the banner says why. With this option on, your manual
-  confirmations also send the e-mail (the button then reads *Confirm, Attach
-  and Send*).
+* **Check automatically for new PDFs** – the folder is checked every 10
+  seconds. A **newly saved PDF** triggers the search in Gmail. Only PDFs saved
+  after the app first started are processed automatically, so old files in
+  the folder are never sent by surprise (use *Scan* for those).
+* **Send e-mail automatically after attaching** – when the new PDF has
+  **exactly one strong match** (company read from the file name, no other
+  draft mentioning the company, draft has a recipient), the PDF is attached
+  and the e-mail is **sent immediately – no dialog, no click**.
 
-If sending fails, the PDF stays attached to the draft and you are told to
-send it yourself. If the connection breaks while sending, the app does not
-retry (it could send twice) – check your Gmail *Sent* folder. The history
-shows *Attached and SENT*, *Attached, NOT sent* or *Attached, send unclear*.
+The app **never stops or asks you anything** in this mode. A PDF without a
+clear match is put on a *Waiting* list shown in the window (with the reason,
+e.g. "no matching draft found yet" or "2 drafts match") and is **tried again
+every 2 minutes** – so you can save the PDF first and write the draft
+afterwards; it is sent as soon as the draft exists. Waiting PDFs never block
+newer ones. Unclear matches are never sent automatically.
 
-Recommended first use: switch on automatic sending **with dry-run mode on**,
-save a test PDF and check in the history that it says the PDF *would be
-attached and sent* to the right draft.
+Results are visible without interrupting you: the banner shows the last sent
+e-mail and the waiting list, the *Processing history* shows *Attached and
+SENT*, *Attached, NOT sent* or *Attached, send unclear*, and every step is in
+the *Activity log*. If sending fails, the PDF stays attached to the draft; if
+the connection breaks while sending, the app does not retry (it could send
+twice) – check your Gmail *Sent* folder.
+
+With only *Check automatically* ticked (sending off), new PDFs are shown for
+you to confirm instead.
+
+**Keep it running:** the app only watches while it is open. To start it
+automatically (minimized) whenever you log in to Windows:
+
+1. Press `Win + R`, type `shell:startup`, press Enter – a folder opens.
+2. Right-click the **Bewerbung Attach Assistant** icon on your Desktop →
+   *Copy*, then right-click in the opened folder → *Paste shortcut*.
+3. Optional: right-click the new shortcut → *Properties* → *Run:*
+   **Minimized**, and add ` --minimized` at the end of *Target*.
+
+To stop auto-start, delete the shortcut from that folder again.
+
+Recommended first use: enable both checkboxes **with dry-run on**, save a
+test PDF and check in the history that it says the PDF *would be attached
+and sent* to the right draft. Then switch dry-run off.
 
 ## 10. How drafts are matched
 

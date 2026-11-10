@@ -197,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--self-test", action="store_true", help="check the installation and exit")
     parser.add_argument("--version", action="store_true", help="print the version and exit")
     parser.add_argument("--data-dir", help="folder for settings, token, history and logs")
+    parser.add_argument("--minimized", action="store_true", help="start with the window minimized")
     args = parser.parse_args(argv)
 
     if args.data_dir:
@@ -240,6 +241,8 @@ def main(argv: list[str] | None = None) -> int:
         config = Config.load(paths)
         db = Database(paths.database_file)
         app = App(config, db, force_dry_run=args.dry_run)
+        if args.minimized:
+            app.iconify()
         log.info("Log file: %s", log_file)
         app.mainloop()
         # Release Tk objects on the main thread (Tcl must not be torn down by

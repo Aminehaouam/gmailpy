@@ -191,6 +191,13 @@ DEFAULTS: dict[str, Any] = {
     # matches always wait for the user.  Also makes confirmed manual
     # attachments send the e-mail.
     "auto_send": False,
+    # Only PDFs saved after this moment (Unix time) are processed
+    # automatically, so older files in the folder are never sent by surprise.
+    # Set when the app starts for the first time.
+    "auto_watch_since": 0.0,
+    # PDFs without a clear match are tried again after this many minutes
+    # (e.g. until the draft has been written).
+    "auto_retry_minutes": 2.0,
     "scanner": {
         # Files modified more recently than this are treated as "still being
         # written" and skipped.
@@ -337,6 +344,14 @@ class Config:
     @auto_send.setter
     def auto_send(self, value: bool) -> None:
         self.data["auto_send"] = bool(value)
+
+    @property
+    def auto_watch_since(self) -> float:
+        return float(self.data.get("auto_watch_since", 0.0))
+
+    @auto_watch_since.setter
+    def auto_watch_since(self, value: float) -> None:
+        self.data["auto_watch_since"] = float(value)
 
     @property
     def auto_check_interval_ms(self) -> int:
