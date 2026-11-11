@@ -182,22 +182,22 @@ DEFAULTS: dict[str, Any] = {
     # Dry-run mode: preview everything, never modify Gmail.  On by default so
     # the first run is always safe; switch it off in the main window.
     "dry_run": True,
-    # Check the folder automatically (every auto_check_interval_seconds while
-    # Gmail is connected) and search the matching draft without clicking Scan.
+    # Automatic mode: watch the folder (every watch_interval_seconds while
+    # Gmail is connected) and react to the latest PDF without clicking Scan.
     "auto_check": True,
-    "auto_check_interval_seconds": 10.0,
-    # Send the e-mail automatically right after the PDF was attached - ONLY
-    # when there is exactly one strong match (see README).  Ambiguous or weak
-    # matches always wait for the user.  Also makes confirmed manual
-    # attachments send the e-mail.
+    "watch_interval_seconds": 3.0,
+    # Fully automatic: attach AND send when the latest PDF fits a draft (see
+    # auto_sender.py).  Also makes confirmed manual attachments send.
     "auto_send": False,
-    # Only PDFs saved after this moment (Unix time) are processed
-    # automatically, so older files in the folder are never sent by surprise.
-    # Set when the app starts for the first time.
-    "auto_watch_since": 0.0,
-    # PDFs without a clear match are tried again after this many minutes
-    # (e.g. until the draft has been written).
-    "auto_retry_minutes": 2.0,
+    # How long a draft must stay unchanged before it is sent automatically
+    # (Gmail saves drafts every few seconds while you type).
+    "draft_settle_seconds": 60.0,
+    # Look again after this many seconds when the draft is not ready yet.
+    "auto_retry_seconds": 15.0,
+    # Number of most recent drafts that are checked in automatic mode.
+    "auto_recent_drafts": 15,
+    # Play a chime when an e-mail was sent.
+    "play_sound": True,
     "scanner": {
         # Files modified more recently than this are treated as "still being
         # written" and skipped.
@@ -346,16 +346,8 @@ class Config:
         self.data["auto_send"] = bool(value)
 
     @property
-    def auto_watch_since(self) -> float:
-        return float(self.data.get("auto_watch_since", 0.0))
-
-    @auto_watch_since.setter
-    def auto_watch_since(self, value: float) -> None:
-        self.data["auto_watch_since"] = float(value)
-
-    @property
-    def auto_check_interval_ms(self) -> int:
-        return int(max(3.0, float(self.data.get("auto_check_interval_seconds", 10.0))) * 1000)
+    def watch_interval_ms(self) -> int:
+        return int(max(1.0, float(self.data.get("watch_interval_seconds", 3.0))) * 1000)
 
     @property
     def scanner(self) -> dict[str, Any]:

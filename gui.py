@@ -19,15 +19,15 @@ import queue
 import subprocess
 import sys
 import threading
-import time
 import tkinter as tk
 import traceback
 from concurrent.futures import Future
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
+from auto_sender import AUTH, DRY_RUN, IDLE, PROBLEM, SENT, WAITING, AutoResult, AutoSender
 from attachment_manager import (
     AttachError,
     AttachmentManager,
@@ -78,6 +78,7 @@ from matching_engine import (
     MatchOutcome,
 )
 from secure_storage import TokenStore
+from sound import play_success_sound
 
 log = logging.getLogger(__name__)
 
@@ -685,7 +686,12 @@ class App(tk.Tk):
         # Automatic checking
         self._auto_flow = False          # current PDF was found by the automatic check
         self._auto_seen: set[str] = set()  # PDFs (SHA-256) already shown automatically
-        self._waiting: dict[str, dict] = {}  # unattended mode: PDFs waiting for a draft
+        self._auto_sender: AutoSender | None = None
+        self._auto_running = False       # an automatic check is queued/running
+        self._auto_last: AutoResult | None = None
+        self._last_sent: AutoResult | None = None
+        self._last_problem: AutoResult | None = None
+        self._watch_text = ""
         self._modal_depth = 0            # >0 while a dialog is open
 
         self.title(f"{APP_NAME} {APP_VERSION}")
@@ -700,14 +706,6 @@ class App(tk.Tk):
         self.folder_var = tk.StringVar(value=str(config.watch_folder))
         self.auto_check_var = tk.BooleanVar(value=config.auto_check)
         self.auto_send_var = tk.BooleanVar(value=config.auto_send)
-        if config.auto_watch_since <= 0:
-            # Only PDFs saved from now on are processed automatically; older
-            # files in the folder are never sent automatically.
-            config.auto_watch_since = time.time()
-            try:
-                config.save()
-            except OSError:
-                pass
 
         self._build_menu()
         self._build_header()
@@ -717,7 +715,7 @@ class App(tk.Tk):
         self._update_dry_run_ui()
         self.refresh_history()
         self.after(self.POLL_MS, self._poll)
-        self.after(self.config_obj.auto_check_interval_ms, self._auto_tick)
+        self.after(1000, self._auto_tick)
 
         incomplete = self.db.list_incomplete()
         if incomplete:
@@ -1036,13 +1034,6 @@ class App(tk.Tk):
     def _handle_error(self, error: BaseException, context: str = "") -> None:
         if isinstance(error, GmailAuthError):
             self._set_gmail_state("expired")
-        if self._auto_flow and self.unattended:
-            log.warning("Automatic processing problem: %s", error)
-            self._auto_park(f"problem: {str(error).splitlines()[0] if str(error) else type(error).__name__}")
-            if isinstance(error, GmailAuthError):
-                self._set_banner("stop", f"{error}\nAutomatic processing is paused until Gmail is "
-                                         "connected again.")
-            return
         log.error("%s%s", f"{context}: " if context else "", error,
                   exc_info=(type(error), error, error.__traceback__) if not isinstance(error, (GmailError, AttachError, ScanError)) else None)
         message = str(error) or type(error).__name__
@@ -1124,26 +1115,28 @@ class App(tk.Tk):
 
     def _on_auto_toggled(self) -> None:
         self.config_obj.auto_check = bool(self.auto_check_var.get())
-        if self.config_obj.auto_check and self.config_obj.auto_watch_since <= 0:
-            self.config_obj.auto_watch_since = time.time()
         self._save_config()
-        self._show_watch_summary()
+        self._watch_text = ""
+        self._show_watch_status()
         log.info("Automatic checking %s", "enabled" if self.config_obj.auto_check else "disabled")
 
     def _on_auto_send_toggled(self) -> None:
         if self.auto_send_var.get() and not self.ask_yes_no(
                 "Enable automatic sending?\n\n"
-                "From now on the app works on its own: when a newly saved PDF has exactly ONE clear "
-                "(strong) matching draft, it attaches the PDF and SENDS the e-mail immediately - no "
-                "dialog, no click.\n\n"
-                "PDFs without a clear match are never sent; they are retried automatically every few "
-                "minutes (e.g. until you have written the draft). A sent e-mail cannot be recalled. "
-                "While dry-run mode is on, nothing is sent.", title="Automatic sending", warning=True):
+                "From now on the app works on its own: it watches the LATEST PDF in the folder, finds "
+                "the draft for that company (your latest draft, if it mentions the company) and "
+                "SENDS the e-mail with the PDF attached - no dialog, no click. A chime plays when "
+                "it was sent.\n\n"
+                "A draft is only sent when it has a recipient, a subject and text and was not "
+                "changed for 1 minute (so a draft you are still writing is never sent). A sent "
+                "e-mail cannot be recalled. While dry-run mode is on, nothing is sent.", title="Automatic sending", warning=True):
             self.auto_send_var.set(False)
         self.config_obj.auto_send = bool(self.auto_send_var.get())
         self._save_config()
         log.info("Automatic sending %s", "enabled" if self.config_obj.auto_send else "disabled")
         self._update_dry_run_ui()
+        self._watch_text = ""
+        self._show_watch_status()
 
     def _update_dry_run_ui(self) -> None:
         if self.dry_run_active:
@@ -1167,6 +1160,8 @@ class App(tk.Tk):
             log.warning("Could not save settings: %s", exc)
         log.info("Dry-run mode %s", "enabled" if self.dry_run_active else "disabled")
         self._update_dry_run_ui()
+        self._watch_text = ""
+        self._show_watch_status()
 
     def _set_gmail_state(self, state: str) -> None:
         self.gmail_state = state
@@ -1229,6 +1224,8 @@ class App(tk.Tk):
         self._set_banner("neutral", "Click 'Scan for newest PDF' to start. Exactly one PDF is processed per run.")
         if not keep_status:
             self._set_status("Ready.")
+        self._watch_text = ""
+        self._show_watch_status()
         self._refresh_buttons()
 
     def _clear_candidates(self) -> None:
@@ -1446,10 +1443,6 @@ class App(tk.Tk):
         else:
             self.company = None
             self._show_pdf(pdf, notes)
-            if auto and self.unattended:
-                self._auto_park(f"company not readable from the file name ({self.parse_result.error}) "
-                                "- rename the file or use Scan", retry=False)
-                return
             company = self.ask_company(
                 pdf.name,
                 "The company name could not be determined from the file name:\n"
@@ -1717,105 +1710,123 @@ class App(tk.Tk):
     # Automatic checking / sending
     # ------------------------------------------------------------------
     def _auto_tick(self) -> None:
-        """Runs every few seconds: look for a new PDF when nothing else is going on."""
+        """Runs every few seconds while automatic checking is on."""
         try:
-            if (self.auto_check_var.get() and not self.busy and self._modal_depth == 0
-                    and self.gmail is not None and self.current_pdf is None):
-                self._auto_scan()
+            if (self.auto_check_var.get() and not self.busy and not self._auto_running
+                    and self._modal_depth == 0 and self.gmail is not None and self.current_pdf is None):
+                folder = Path(self.folder_var.get())
+                if folder.is_dir():
+                    if self.send_enabled:
+                        self._auto_run(folder)
+                    else:
+                        self._auto_offer(folder)
         finally:
-            self.after(self.config_obj.auto_check_interval_ms, self._auto_tick)
+            self.after(self.config_obj.watch_interval_ms, self._auto_tick)
 
-    @property
-    def unattended(self) -> bool:
-        """Fully automatic mode: never ask, never wait for a click."""
-        return self.auto_check_var.get() and self.send_enabled
+    def _get_auto_sender(self) -> AutoSender:
+        if self._auto_sender is None or self._auto_sender.gmail is not self.gmail:
+            self._auto_sender = AutoSender(self.gmail, self.db, self.config_obj.data)
+        return self._auto_sender
 
-    def _auto_scan(self) -> None:
-        folder = Path(self.folder_var.get())
-        if not folder.is_dir():
-            return
-        scanner = self._make_scanner()
-        now = time.time()
-        # PDFs waiting for a draft are retried only when their next try is due.
-        excluded = {sha for sha, w in self._waiting.items() if w["next_try"] > now} | set(self._auto_seen)
-        since = self.config_obj.auto_watch_since
+    def _run_quiet(self, fn: Callable[[], Any], on_success: Callable[[Any], None]) -> None:
+        """Background task without status text / progress bar / disabled
+        buttons (the automatic check runs every few seconds)."""
+        self._auto_running = True
 
-        def on_result(result: ScanResult) -> None:
-            if result.selected is None or self.current_pdf is not None:
-                self._show_watch_summary()
+        def done(future: Future) -> None:
+            self._auto_running = False
+            error = future.exception()
+            if error is not None:
+                log.warning("Automatic check failed: %s", error)
                 return
-            pdf = result.selected
-            if not self.unattended:
-                self._auto_seen.add(pdf.sha256)  # semi-automatic: show each PDF once
-            log.info("Automatic check: processing %s", pdf.name)
+            on_success(future.result())
+
+        self.worker.submit(fn, done)
+
+    def _auto_run(self, folder: Path) -> None:
+        """Fully automatic: latest PDF -> matching draft -> attach and send."""
+        sender = self._get_auto_sender()
+        dry_run = self.dry_run_active
+        self._run_quiet(lambda: sender.run_once(folder, dry_run=dry_run), self._on_auto_result)
+
+    def _auto_offer(self, folder: Path) -> None:
+        """Semi-automatic (sending off): show a new latest PDF for confirmation."""
+        sender = self._get_auto_sender()
+        scanner = self._make_scanner()
+        seen = set(self._auto_seen)
+
+        def task() -> PdfFile | None:
+            latest = sender.latest_pdf(folder)
+            if latest is None:
+                return None
+            path, st = latest
+            sha = sender._sha(path, st)
+            if sha in seen or self.db.find_blocking_record(sha) is not None:
+                return None
+            try:
+                return scanner.check_single(path)
+            except ScanError:
+                return None  # still being written etc. - next tick
+
+        def done(pdf: PdfFile | None) -> None:
+            if pdf is None or self.current_pdf is not None or self.busy:
+                return
+            self._auto_seen.add(pdf.sha256)
+            log.info("Automatic check found %s", pdf.name)
             self._select_pdf(pdf, ["Found automatically."], auto=True)
 
-        def on_error(error: BaseException) -> None:
-            log.warning("Automatic check failed: %s", error)
+        self._run_quiet(task, done)
 
-        self._run_task("Checking for new PDFs...",
-                       lambda: scanner.scan(folder, exclude_hashes=excluded, newer_than=since),
-                       on_result, on_error)
+    def _on_auto_result(self, result: AutoResult) -> None:
+        if result.kind in (SENT, DRY_RUN, PROBLEM):
+            self.refresh_history()
+            log.info("Automatic result: %s", result.message)
+        if result.kind == SENT:
+            self._last_sent = result
+            if self.config_obj.data.get("play_sound", True):
+                play_success_sound(fallback=self.bell)
+        elif result.kind == PROBLEM:
+            self._last_problem = result
+        elif result.kind == AUTH:
+            self._set_gmail_state("expired")
+        self._show_watch_status(result)
 
-    def _auto_park(self, reason: str, retry: bool = True) -> None:
-        """Unattended mode: put the current PDF aside (no dialog), keep watching,
-        and try it again later - e.g. the draft may not have been written yet."""
-        pdf = self.current_pdf
-        if pdf is not None:
-            minutes = float(self.config_obj.data.get("auto_retry_minutes", 2.0))
-            # Not retryable (e.g. unreadable file name): look again in 5 minutes
-            # anyway - cheap, and picks up a renamed file.
-            next_try = time.time() + (minutes if retry else max(minutes, 5.0)) * 60
-            previous = self._waiting.get(pdf.sha256)
-            if previous is None or previous["reason"] != reason:
-                log.info("Waiting: %s - %s", pdf.name, reason)
-            self._waiting[pdf.sha256] = {"name": pdf.name, "reason": reason, "next_try": next_try}
-        self._reset_workflow(keep_status=True)
-        self._show_watch_summary()
+    def _show_watch_status(self, result: AutoResult | None = None) -> None:
+        if self.current_pdf is not None or not self.auto_check_var.get():
+            return  # a manual check is in progress - do not overwrite it
+        if result is not None:
+            self._auto_last = result
+        result = self._auto_last
+        interval = self.config_obj.watch_interval_ms // 1000
+        mode = ("the latest PDF is attached and SENT automatically when it fits a draft"
+                if self.send_enabled else "a new latest PDF is shown here for you to confirm")
+        if self.dry_run_active and self.send_enabled:
+            mode += " (DRY-RUN: nothing is really sent)"
+        lines = [f"Watching the folder every {interval} s - {mode}."]
+        kind = "info"
+        if result is not None and self.send_enabled:
+            if result.kind == WAITING:
+                when = (datetime.now() + timedelta(seconds=result.retry_in)).strftime("%H:%M:%S")
+                lines.append(f"Latest PDF {result.pdf_name}: {result.message} (next check {when}).")
+            elif result.kind == IDLE:
+                lines.append(result.message)
+            elif result.kind == AUTH:
+                kind = "stop"
+                lines.append(f"Paused: {result.message}")
+        if self._last_problem is not None:
+            kind = "warn" if kind == "info" else kind
+            lines.append(f"Needs your attention: {self._last_problem.message}")
+        if self._last_sent is not None:
+            if kind == "info" and (result is None or result.kind == SENT):
+                kind = "ok"
+            lines.append(f"Last sent: {self._last_sent.message}")
+        text = "\n".join(lines)
+        if text != self._watch_text:
+            self._watch_text = text
+            self._set_banner(kind, text)
+            self._set_status("Watching for new PDFs...")
 
-    def _show_watch_summary(self) -> None:
-        if not self.auto_check_var.get() or self.current_pdf is not None:
-            return
-        since = datetime.fromtimestamp(self.config_obj.auto_watch_since).strftime("%Y-%m-%d %H:%M")
-        lines = [f"Watching the folder for new PDFs (saved after {since}). "
-                 + ("Clear matches are attached and sent automatically." if self.unattended
-                    else "New PDFs are shown here for you to confirm.")]
-        if self._waiting:
-            lines.append("")
-            lines.append("Waiting (checked again automatically):")
-            for w in list(self._waiting.values())[-6:]:
-                when = f" - next try {datetime.fromtimestamp(w['next_try']).strftime('%H:%M')}"
-                lines.append(f"- {w['name']}: {w['reason']}{when}")
-        if self.last_result is not None and self.last_result.sent:
-            lines.append("")
-            lines.append("Last sent: " + self.last_result.message)
-        self._set_banner("info", "\n".join(lines))
-        self._set_status("Watching for new PDFs...")
-
-    def _auto_send_blocker(self) -> str | None:
-        """None if the current match may be attached and sent without asking,
-        otherwise the reason why it must not be sent automatically."""
-        outcome = self.outcome
-        if outcome is None or outcome.status == NO_MATCH:
-            return "no matching draft found yet"
-        if outcome.status == WEAK_ONLY:
-            return "only uncertain matches (part of the name / similar spelling)"
-        if outcome.status == MULTIPLE:
-            return f"{len(outcome.candidates)} drafts match - delete or rename the extra draft"
-        if outcome.status == SINGLE_POSSIBLE:
-            return "company found only in the text, not in subject or recipient"
-        if outcome.status != SINGLE_STRONG or outcome.proposed is None:
-            return "no single clear match"
-        if len(outcome.candidates) != 1:
-            return "other drafts also mention this company"
-        if self.parse_result is None or not self.parse_result.ok or self.company != self.parse_result.company:
-            return "the company name was not read from the file name"
-        if self.rejected_draft_ids or self.manual_match is not None:
-            return "a draft was rejected or selected manually"
-        if self.selected_match is not outcome.proposed:
-            return "a different draft is selected"
-        if not outcome.proposed.draft.to:
-            return "the draft has no recipient yet"
+    def _auto_send_blocker(self) -> str | None:  # pragma: no cover - kept for compatibility
         return None
 
     def _draw_attention(self) -> None:
@@ -1829,55 +1840,14 @@ class App(tk.Tk):
             pass
 
     def _continue_automatically(self) -> None:
-        """Called after an automatically found PDF was matched."""
-        if not self.send_enabled:
-            self._draw_attention()  # semi-automatic: the user confirms
-            return
-        blocker = self._auto_send_blocker()
-        if blocker is not None:
-            self._auto_park(blocker)
-            return
-        match = self.selected_match
-        pdf, company = self.current_pdf, self.company
-        manager = AttachmentManager(self.gmail, self.db)
-        log.info("Automatic attach%s: %s -> draft %s ('%s')", "" if self.dry_run_active else " and send",
-                 pdf.name, match.draft.draft_id, match.draft.subject)
-
-        def on_error(error: BaseException) -> None:
-            if isinstance(error, DuplicateAttachmentError) and error.exact_duplicate:
-                manager.mark_already_attached(pdf, company, match.draft)
-                self._auto_park("already attached to the draft (by hand?) - not sent automatically",
-                                retry=False)
-                self.refresh_history()
-                return
-            self._handle_error(error)
-
-        self._run_task("Preparing automatic attachment...",
-                       lambda: manager.prepare(pdf, company, match.draft),
-                       lambda plan: self._execute_plan(manager, plan), on_error)
+        """Semi-automatic mode: a new PDF was matched - bring the window up."""
+        self._draw_attention()
 
     def _on_attach_result(self, result: AttachResult) -> None:
         self.last_result = result
         auto = self._auto_flow
-        pdf = self.current_pdf
         self.refresh_history()
         self._set_status(result.message.splitlines()[0])
-        if auto and pdf is not None and result.status != STATUS_FAILED:
-            self._waiting.pop(pdf.sha256, None)
-        if auto and self.unattended:
-            # Never open a dialog in unattended mode; everything is in the
-            # banner, the activity log and the history.
-            if result.status == STATUS_FAILED:
-                self._auto_park(f"not attached: {result.message}")
-                return
-            if pdf is not None and result.status == STATUS_DRY_RUN:
-                self._auto_seen.add(pdf.sha256)  # dry run: do not repeat it every tick
-            log.info("Automatic result: %s", result.message)
-            self._reset_workflow(keep_status=True)
-            self._show_watch_summary()
-            if result.send_status not in (None, SEND_SENT) or result.status == STATUS_UNVERIFIED:
-                self._set_banner("warn", result.message)
-            return
         if result.status == STATUS_SUCCESS and result.send_status in (None, SEND_SENT):
             if not auto:
                 self.show_info(result.message, title="Sent" if result.sent else "Attached")

@@ -786,6 +786,18 @@ class GmailClient:
     ) -> tuple[list[DraftInfo], bool]:
         """Read every draft.  Unchanged drafts come from the cache."""
         refs, truncated = self.list_draft_refs(max_drafts)
+        return self._infos_for(refs, progress), truncated
+
+    def recent_drafts(self, count: int = 15) -> list[DraftInfo]:
+        """The most recently saved drafts, newest first (fast: only *count*
+        drafts are listed; unchanged drafts come from the cache)."""
+        refs, _ = self.list_draft_refs(max_drafts=count)
+        infos = self._infos_for(refs, None)
+        epoch = datetime.fromtimestamp(0, tz=timezone.utc)
+        return sorted(infos, key=lambda d: d.internal_date or epoch, reverse=True)
+
+    def _infos_for(self, refs: list[DraftRef],
+                   progress: Callable[[int, int], None] | None) -> list[DraftInfo]:
         result: list[DraftInfo] = []
         for index, ref in enumerate(refs, 1):
             if progress:
@@ -802,7 +814,7 @@ class GmailClient:
                 continue
             self._cache[info.message_id] = info
             result.append(info)
-        return result, truncated
+        return result
 
     def get_draft_message_id(self, draft_id: str) -> str:
         """Current message id of a draft (cheap format=minimal request)."""

@@ -63,7 +63,7 @@ class FakeGmailBackend:
             "message_id": f"m-{n:04d}",
             "thread_id": thread_id or f"t-{n:04d}",
             "raw": raw,
-            "internal_date": internal_date_ms or int(time.time() * 1000) - n * 1000,
+            "internal_date": internal_date_ms or int(time.time() * 1000) - 3_600_000 + n * 1000,
         }
         self.order.insert(0, draft_id)  # Gmail lists newest first
         return draft_id

@@ -311,33 +311,44 @@ first (for example if the draft for the newest PDF does not exist yet).
 
 ### Fully automatic mode (no clicks)
 
-Tick both checkboxes in the main window (and switch dry-run off):
+Set this once in the main window (the settings are saved):
 
-* **Check automatically for new PDFs** – the folder is checked every 10
-  seconds. A **newly saved PDF** triggers the search in Gmail. Only PDFs saved
-  after the app first started are processed automatically, so old files in
-  the folder are never sent by surprise (use *Scan* for those).
-* **Send e-mail automatically after attaching** – when the new PDF has
-  **exactly one strong match** (company read from the file name, no other
-  draft mentioning the company, draft has a recipient), the PDF is attached
-  and the e-mail is **sent immediately – no dialog, no click**.
+* tick **Check automatically for new PDFs**,
+* tick **Send e-mail automatically after attaching**,
+* untick **Dry-run mode**.
 
-The app **never stops or asks you anything** in this mode. A PDF without a
-clear match is put on a *Waiting* list shown in the window (with the reason,
-e.g. "no matching draft found yet" or "2 drafts match") and is **tried again
-every 2 minutes** – so you can save the PDF first and write the draft
-afterwards; it is sent as soon as the draft exists. Waiting PDFs never block
-newer ones. Unclear matches are never sent automatically.
+From then on the app works on its own, every **3 seconds**:
 
-Results are visible without interrupting you: the banner shows the last sent
-e-mail and the waiting list, the *Processing history* shows *Attached and
-SENT*, *Attached, NOT sent* or *Attached, send unclear*, and every step is in
-the *Activity log*. If sending fails, the PDF stays attached to the draft; if
-the connection breaks while sending, the app does not retry (it could send
-twice) – check your Gmail *Sent* folder.
+1. It looks at the **latest PDF** in the Bewerbungen folder (newest saved,
+   created or copied file – only that one).
+2. If it was not sent yet, it reads the company from the file name.
+3. It looks at your **most recent drafts** (fast – not the whole mailbox) and
+   picks the draft for that company: the one draft whose subject or
+   recipient clearly contains the company, otherwise **your latest draft**
+   if it mentions the company anywhere (subject, recipient or text).
+4. It attaches the PDF and **sends the e-mail**, and plays a short
+   **success chime**. The banner shows "Last sent: ...".
 
-With only *Check automatically* ticked (sending off), new PDFs are shown for
-you to confirm instead.
+It never opens a dialog in this mode. If something does not fit yet, the
+banner says why and the app simply looks again (every 15 seconds), for
+example:
+
+* "no recent draft mentions 'Trompetter' yet" – write the draft; it is sent
+  as soon as it exists,
+* "the draft was changed 12 s ago" – a draft is only sent when it has a
+  recipient, a subject and some text and was **not changed for 1 minute**,
+  so a draft you are still typing (Gmail saves it every few seconds) is
+  never sent half-written,
+* "company not readable from the file name" – rename the file.
+
+A PDF that was sent is never sent again (also not after renaming). If
+sending fails, the PDF stays attached to the draft and the banner says
+"Needs your attention". The timings can be changed in `config.json`
+(`watch_interval_seconds`, `draft_settle_seconds`, `auto_retry_seconds`,
+`play_sound`).
+
+With only *Check automatically* ticked (sending off), a new latest PDF is
+shown for you to confirm instead.
 
 **Keep it running:** the app only watches while it is open. To start it
 automatically (minimized) whenever you log in to Windows:

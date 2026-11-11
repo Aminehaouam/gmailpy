@@ -5,7 +5,6 @@ scripted answers through the App's ask_*/show_* methods.
 """
 
 import gc
-import time
 
 import pytest
 
@@ -50,7 +49,6 @@ def make_app(config, db, backend, folder):
         config.watch_folder = folder
         config.auto_check = auto_check
         config.auto_send = False
-        config.auto_watch_since = 1.0  # test PDFs are back-dated
         script = Script()
 
         def factory(paths, token_store, **kwargs):
@@ -345,139 +343,84 @@ def test_auto_check_finds_new_pdf_without_scan_click(make_app, backend, make_pdf
     assert app.current_pdf is not None
 
 
-def test_auto_send_single_strong_match(make_app, backend, make_pdf, db):
+@pytest.fixture
+def chimes(monkeypatch):
+    import gui
+    played = []
+    monkeypatch.setattr(gui, "play_success_sound", lambda fallback=None: played.append(True))
+    return played
+
+
+def test_auto_send_without_any_click_and_chime(make_app, backend, make_pdf, db, chimes):
     backend.add_draft(ms.alternative_draft("Bewerbung Siemens", "jobs@siemens.com"))
     target = backend.add_draft(ms.alternative_draft("Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de"))
     app, script = make_app()
-    script.answer_yes = True                            # confirms enabling auto-send
+    script.answer_yes = True                            # confirms enabling auto-send once
     enable_auto(app, send=True, live=True)
     connect(app)
-    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=60)
+    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=30)
     auto_tick(app)
-    assert app.last_result is not None and app.last_result.sent, app.last_result
     assert [s["draft_id"] for s in backend.sent] == [target]
-    assert script.confirms == []                        # no confirmation dialog in auto mode
-    assert app.current_pdf is None                      # ready for the next PDF
+    assert chimes == [True]                             # success sound
+    assert script.confirms == [] and script.infos == script.warnings == script.errors == []
+    assert "Last sent" in app.banner.cget("text")
     assert db.list_history()[0].send_status == "sent"
-    # The next tick does not send anything again.
-    auto_tick(app)
-    assert len(backend.sent) == 1
+    assert app.history_tree.get_children()
+    auto_tick(app)                                      # nothing is sent twice
+    assert len(backend.sent) == 1 and chimes == [True]
 
 
-def test_unattended_ambiguous_is_parked_without_dialog(make_app, backend, make_pdf):
-    backend.add_draft(ms.alternative_draft("Bewerbung Trompetter", "jobs@trompetter.de"))
-    backend.add_draft(ms.alternative_draft("Nachfrage Trompetter", "info@trompetter.de"))
+def test_auto_waiting_is_shown_without_dialog(make_app, backend, make_pdf, chimes):
     app, script = make_app()
     enable_auto(app, send=True, live=True)
     connect(app)
-    pdf = make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=60)
+    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=30)
     auto_tick(app)
-    assert backend.sent == [] and backend.method_calls("drafts.update") == []
-    assert app.current_pdf is None                      # never blocks: keeps watching
-    waiting = list(app._waiting.values())
-    assert waiting and "2 drafts match" in waiting[0]["reason"]
-    assert script.infos == script.warnings == script.errors == []   # no dialogs
-    assert "Waiting" in app.banner.cget("text") and pdf.name in app.banner.cget("text")
-
-
-def test_unattended_body_only_match_is_not_sent(make_app, backend, make_pdf):
-    backend.add_draft(ms.alternative_draft("Bewerbung als Elektroniker", "info@tb-elektro.de",
-                                           body_plain="Sehr geehrte Damen und Herren der Trompetter GmbH,"))
-    app, _script = make_app()
-    enable_auto(app, send=True, live=True)
-    connect(app)
-    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=60)
-    auto_tick(app)
-    assert backend.sent == []
-    assert "only in the text" in next(iter(app._waiting.values()))["reason"]
-
-
-def test_unattended_unreadable_filename_never_asks(make_app, backend, make_pdf):
-    backend.add_draft(ms.alternative_draft("Bewerbung bei Bosch", "karriere@bosch.de"))
-    make_pdf("Bewerbung_Bosch_final.pdf", age=60)
-    app, script = make_app()
-    asked = []
-    app.ask_company = lambda *a: asked.append(a) or "Bosch"
-    enable_auto(app, send=True, live=True)
-    connect(app)
-    auto_tick(app)
-    assert asked == [] and backend.sent == []
-    assert "company not readable" in next(iter(app._waiting.values()))["reason"]
-
-
-def test_unattended_retries_until_draft_exists(make_app, backend, make_pdf):
-    """PDF saved first, draft written later: it is sent on a later retry."""
-    app, script = make_app()
-    enable_auto(app, send=True, live=True)
-    connect(app)
-    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=60)
-    auto_tick(app)
-    assert backend.sent == [] and "no matching draft" in next(iter(app._waiting.values()))["reason"]
-    auto_tick(app)                                      # not due yet: nothing happens
-    assert backend.method_calls("drafts.update") == []
-    target = backend.add_draft(ms.alternative_draft("Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de"))
-    for w in app._waiting.values():
-        w["next_try"] = 0                               # retry time reached
-    auto_tick(app)
-    assert [s["draft_id"] for s in backend.sent] == [target]
-    assert app._waiting == {}
-    assert script.infos == script.warnings == script.errors == []
-
-
-def test_unattended_keeps_processing_other_pdfs(make_app, backend, make_pdf):
-    """A PDF without draft does not block the next PDF."""
-    backend.add_draft(ms.alternative_draft("Bewerbung - Barth und Kerner GmbH", "info@barth-kerner.de"))
-    app, _script = make_app()
-    enable_auto(app, send=True, live=True)
-    connect(app)
-    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Barth_und_Kerner_GmbH.pdf", age=120)
-    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=60)   # newest, no draft
-    auto_tick(app)                                      # Trompetter -> waiting
-    auto_tick(app)                                      # Barth und Kerner -> sent
-    assert len(backend.sent) == 1
-    assert "Trompetter" in next(iter(app._waiting.values()))["name"]
-
-
-def test_unattended_ignores_pdfs_older_than_watch_start(make_app, backend, make_pdf, config):
+    text = app.banner.cget("text")
+    assert "Latest PDF" in text and "no drafts in Gmail yet" in text
+    assert app.current_pdf is None and backend.sent == [] and chimes == []
+    assert script.infos == script.warnings == script.errors == script.questions[1:] == []
+    # The draft is written afterwards -> sent on the next check.
     backend.add_draft(ms.alternative_draft("Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de"))
-    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=3600)
+    app._auto_sender._next_try.clear()
+    auto_tick(app)
+    assert len(backend.sent) == 1 and chimes == [True]
+
+
+def test_auto_check_keeps_buttons_usable(make_app, backend, make_pdf):
     app, _script = make_app()
-    config.auto_watch_since = time.time() - 600         # watching started 10 min ago
     enable_auto(app, send=True, live=True)
     connect(app)
-    auto_tick(app)
-    assert backend.sent == [] and app.current_pdf is None
-    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter_v2.pdf", age=30, label="v2")
-    auto_tick(app)
-    assert len(backend.sent) == 1
+    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=30)
+    app._auto_tick()
+    assert state(app.scan_button) == "normal"           # no flicker every few seconds
+    app.wait_until_idle()
 
 
-def test_unattended_send_failure_shows_no_dialog(make_app, backend, make_pdf):
+def test_auto_send_failure_shows_no_dialog(make_app, backend, make_pdf, chimes):
     from fakes import http_error
     backend.add_draft(ms.alternative_draft("Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de"))
     backend.fail_before["drafts.send"] = [http_error(400, "invalidArgument", "Invalid To header")]
     app, script = make_app()
     enable_auto(app, send=True, live=True)
     connect(app)
-    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=60)
+    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=30)
     auto_tick(app)
-    assert script.warnings == script.errors == []
-    assert app.current_pdf is None
-    assert "NOT sent" in app.banner.cget("text") or "refused" in app.banner.cget("text")
+    assert script.warnings == script.errors == [] and chimes == []
+    assert "Needs your attention" in app.banner.cget("text")
     assert app.db.list_history()[0].send_status == "failed"
 
 
-def test_auto_send_in_dry_run_sends_nothing(make_app, backend, make_pdf):
+def test_auto_send_in_dry_run_sends_nothing(make_app, backend, make_pdf, chimes):
     target = backend.add_draft(ms.alternative_draft("Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de"))
     original = backend.raw_of(target)
     app, _script = make_app()
     enable_auto(app, send=True, live=False)
     connect(app)
-    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=60)
+    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=30)
     auto_tick(app)
-    assert app.last_result.status == STATUS_DRY_RUN
-    assert backend.sent == [] and backend.raw_of(target) == original
-    auto_tick(app)                                      # same PDF is not dry-run again and again
+    auto_tick(app)
+    assert backend.sent == [] and backend.raw_of(target) == original and chimes == []
     assert len([r for r in app.db.list_history() if r.status == STATUS_DRY_RUN]) == 1
 
 
