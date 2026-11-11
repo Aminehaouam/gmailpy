@@ -20,14 +20,25 @@ from ba_parser import Job
 
 _JOB_FIELDS = {f.name for f in fields(Job)}
 
+# Export columns (everything from the BA listing).
 CSV_COLUMNS = [
-    ("first_seen", "Gefunden am"), ("specialty", "Fachrichtung"), ("company", "Firma"),
-    ("street", "Straße"), ("plz", "PLZ"), ("ort", "Ort"), ("start", "Beginn"),
-    ("contact_person", "Ansprechpartner"), ("emails", "E-Mail"), ("phones", "Telefon"),
-    ("email_source", "E-Mail gefunden in"), ("website", "Firmenwebsite"),
-    ("homepage", "Homepage (BA)"), ("external_url", "Bewerbung über Partnerseite"),
-    ("title", "Stellentitel"), ("education", "Schulabschluss"), ("url", "Link zur Stelle"),
-    ("refnr", "Referenznummer"),
+    ("first_seen", "Gefunden am"), ("company", "Firma"), ("specialty", "Fachrichtung"),
+    ("title", "Stellentitel"), ("beruf", "Ausbildungsberuf"),
+    ("contact_person", "Ansprechpartner"), ("contact_position", "Position"),
+    ("emails", "E-Mail"), ("email_source", "E-Mail gefunden in"), ("phones", "Telefon"),
+    ("homepage", "Firmenwebsite"), ("contact_address", "Kontaktadresse"),
+    ("street", "Straße"), ("plz", "PLZ"), ("ort", "Ort"), ("region", "Bundesland"),
+    ("locations", "Alle Arbeitsorte"), ("start", "Beginn"), ("pay", "Ausbildungsvergütung"),
+    ("pay_note", "Vergütungsangabe"), ("working_time", "Arbeitszeit"), ("contract", "Vertragsdauer"),
+    ("education", "Schulabschluss"), ("application_methods", "Bewerbung"),
+    ("application_url", "Online-Bewerbung"), ("required_documents", "Geforderte Unterlagen"),
+    ("external_url", "Bewerbung über Partnerseite"), ("partner_name", "Partner"),
+    ("other_links", "Weitere Links"), ("social_links", "Social Media"),
+    ("employer_contact", "Kontakt im Arbeitgeberprofil"), ("company_size", "Betriebsgröße"),
+    ("founded", "Gründungsjahr"), ("headquarters", "Hauptsitz"), ("benefits", "Mitarbeitervorteile"),
+    ("employer_description", "Über den Arbeitgeber"), ("published", "Veröffentlicht"),
+    ("changed", "Geändert"), ("chiffre", "Chiffre"), ("refnr", "Referenznummer"), ("url", "Link zur Stelle"),
+    ("contact_status", "Kontaktstatus"), ("description", "Stellenbeschreibung"),
 ]
 
 
@@ -40,10 +51,6 @@ class JobStore:
             conn.execute("""CREATE TABLE IF NOT EXISTS jobs (
                 refnr TEXT PRIMARY KEY, data TEXT NOT NULL,
                 first_seen TEXT NOT NULL, updated TEXT NOT NULL)""")
-            # E-mail search results per company (also "nothing found", so the
-            # same company is not searched again and again).
-            conn.execute("""CREATE TABLE IF NOT EXISTS companies (
-                name TEXT PRIMARY KEY, website TEXT, emails TEXT, source TEXT, updated TEXT NOT NULL)""")
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path, timeout=15)
@@ -65,32 +72,6 @@ class JobStore:
                 """INSERT INTO jobs (refnr, data, first_seen, updated) VALUES (?, ?, ?, ?)
                    ON CONFLICT(refnr) DO UPDATE SET data = excluded.data, updated = excluded.updated""",
                 (job.refnr, data, now, now))
-
-    @staticmethod
-    def _company_key(name: str) -> str:
-        return " ".join((name or "").casefold().split())
-
-    def company_get(self, name: str) -> dict | None:
-        """Cached e-mail search result; 'nothing found' results expire after 7 days."""
-        with self._lock, self._connect() as conn:
-            row = conn.execute("SELECT website, emails, source, updated FROM companies WHERE name = ?",
-                               (self._company_key(name),)).fetchone()
-        if row is None:
-            return None
-        emails = json.loads(row[1] or "[]")
-        if not emails and (datetime.now() - datetime.fromisoformat(row[3])).days >= 7:
-            return None
-        return {"website": row[0] or "", "emails": emails, "source": row[2] or ""}
-
-    def company_put(self, job: Job) -> None:
-        now = datetime.now().isoformat(timespec="seconds")
-        emails = job.emails if job.email_source.startswith("Firmenwebsite") else []
-        with self._lock, self._connect() as conn:
-            conn.execute(
-                """INSERT INTO companies (name, website, emails, source, updated) VALUES (?, ?, ?, ?, ?)
-                   ON CONFLICT(name) DO UPDATE SET website = excluded.website, emails = excluded.emails,
-                   source = excluded.source, updated = excluded.updated""",
-                (self._company_key(job.company), job.website, json.dumps(emails), job.email_source, now))
 
     def all(self) -> list[tuple[Job, str]]:
         """All jobs, newest first, with the date they were first found."""
@@ -117,10 +98,23 @@ class JobStore:
                 for key, _ in CSV_COLUMNS:
                     if key == "first_seen":
                         value = first_seen.replace("T", " ")
+                    elif key == "pay":
+                        value = job.pay_text()
                     else:
                         value = getattr(job, key)
                     if isinstance(value, list):
-                        value = ", ".join(value)
+                        value = " | ".join(str(v) for v in value)
                     row.append(value)
                 writer.writerow(row)
+        return len(jobs)
+
+    def export_json(self, target: Path) -> int:
+        """All data as JSON (convenient for further processing, e.g. by Claude)."""
+        jobs = self.all()
+        data = []
+        for job, first_seen in jobs:
+            item = asdict(job)
+            item.update(first_seen=first_seen, url=job.url, pay=job.pay_text())
+            data.append(item)
+        target.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         return len(jobs)

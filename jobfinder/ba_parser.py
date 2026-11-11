@@ -105,6 +105,7 @@ def _address(location: dict | None) -> dict[str, str]:
 
 @dataclass
 class Job:
+    # --- from the search result list
     refnr: str
     title: str
     beruf: str
@@ -116,23 +117,48 @@ class Job:
     region: str = ""
     start: str = ""
     published: str = ""
-    # filled from the detail page
+    # --- job ad (detail page)
     description: str = ""
     education: str = ""
-    homepage: str = ""
+    locations: list[str] = field(default_factory=list)    # all places of work
+    pay_per_year: list[int] = field(default_factory=list)  # Ausbildungsvergütung 1./2./3./4. Jahr
+    pay_note: str = ""
+    working_time: str = ""
+    contract: str = ""
+    changed: str = ""
+    chiffre: str = ""
+    supported_by_ba: bool = False                        # "Stelle betreut durch die BA"
+    external_url: str = ""                               # partner portal: apply there
+    partner_name: str = ""
+    # --- employer profile on the BA page
+    homepage: str = ""                                   # company website (from the BA listing)
+    other_links: list[str] = field(default_factory=list)
+    social_links: list[str] = field(default_factory=list)
+    employer_description: str = ""
     company_size: str = ""
-    external_url: str = ""     # job from a partner portal: apply there
-    website: str = ""          # company website used to find the e-mail
-    email_source: str = ""     # where the e-mail address was found
+    founded: str = ""
+    headquarters: str = ""
+    benefits: list[str] = field(default_factory=list)
+    employer_contact: str = ""                           # contact block of the employer profile
+    # --- contact data ("Informationen zur Bewerbung", behind the Sicherheitsabfrage)
+    contact_person: str = ""                             # Ansprechpartner
+    contact_position: str = ""
+    contact_address: str = ""
     emails: list[str] = field(default_factory=list)
-    phones: list[str] = field(default_factory=list)
-    contact_person: str = ""
-    contact_text: str = ""
+    phones: list[str] = field(default_factory=list)      # "Telefon: ...", "Mobil: ...", "Fax: ..."
+    email_source: str = ""                               # where the e-mail address was found
+    application_methods: list[str] = field(default_factory=list)
+    application_url: str = ""                            # online application form
+    required_documents: str = ""
+    contact_text: str = ""                               # visible text of the contact box
     contact_status: str = ""   # "", "ok", "none", "external", "captcha-skipped", "error"
 
     @property
     def url(self) -> str:
         return detail_url(self.refnr)
+
+    def pay_text(self) -> str:
+        return ", ".join(f"{i}. Jahr {euro:,} €".replace(",", ".") for i, euro in enumerate(self.pay_per_year, 1))
 
 
 @dataclass
@@ -186,42 +212,184 @@ def parse_search(state: dict[str, Any]) -> SearchPage:
 _BILDUNG = {
     "MITTLERE_REIFE_MITTLERER_BILDUNGSABSCHLUSS": "Mittlere Reife",
     "HAUPTSCHULABSCHLUSS": "Hauptschulabschluss",
+    "QUALIFIZIERENDER_ERWEITERTER_HAUPTSCHULABSCHLUSS": "Qualifizierter / erweiterter Hauptschulabschluss",
+    "QUALIFIZIERTER_ERWEITERTER_HAUPTSCHULABSCHLUSS": "Qualifizierter / erweiterter Hauptschulabschluss",
     "FACHHOCHSCHULREIFE": "Fachhochschulreife",
     "ABITUR_HOCHSCHULREIFE": "Abitur",
+    "NICHT_RELEVANT": "nicht relevant",
     "KEINE_ANGABE": "",
 }
+_WORKING_TIME = [
+    ("arbeitszeitVollzeit", "Vollzeit"), ("arbeitszeitTeilzeitVormittag", "Teilzeit vormittags"),
+    ("arbeitszeitTeilzeitNachmittag", "Teilzeit nachmittags"), ("arbeitszeitTeilzeitAbend", "Teilzeit abends"),
+    ("arbeitszeitTeilzeitFlexibel", "Teilzeit flexibel"),
+    ("arbeitszeitSchichtNachtWochenende", "Schicht / Nacht / Wochenende"),
+    ("homeofficemoeglich", "Homeoffice möglich"),
+]
+_ANREDE = {"HERR": "Herr", "FRAU": "Frau", "HERR_FRAU": ""}
+_APPLICATION = [
+    ("bewerbungPerEMail", "per E-Mail"), ("bewerbungUeberInternet", "online (Website des Arbeitgebers)"),
+    ("bewerbungSchriftlich", "schriftlich (Post)"), ("bewerbungTelefonisch", "telefonisch"),
+    ("bewerbungPersoenlich", "persönlich"), ("bewerbungUeberArbeitsagenturDe", "über das Portal der BA"),
+]
+
+
+def _label(value: str | None) -> str:
+    if not value or value.startswith("KEINE_ANGABE"):
+        return ""
+    return value.replace("_", " ").capitalize()
+
+
+def _format_address(adresse: dict | None) -> str:
+    adresse = adresse or {}
+    street = " ".join(x for x in (adresse.get("strasse"), adresse.get("hausnummer")) if x)
+    city = " ".join(x for x in (adresse.get("plz"), adresse.get("ort")) if x)
+    parts = [adresse.get("adresszusatz"), adresse.get("ortsteil"), street,
+             f"Postfach {adresse['postfach']}" if adresse.get("postfach") else "", city]
+    return ", ".join(p for p in parts if p)
+
+
+def _strip_markdown(text: str) -> str:
+    text = re.sub(r"\[([^\]]*)\]\(([^)]*)\)", r"\1 (\2)", text or "")   # [label](url) -> label (url)
+    return re.sub(r"[*_#`]+", "", text).strip()
+
+
+def _find_person(text: str) -> str:
+    """'Ihr Ansprechpartner: Herr Max Muster' / 'Frau Dr. Lisa Schmidt' in free text."""
+    match = re.search(r"Ansprechpartner(?:in)?\s*(?:ist|:)?\s*[:\-–]?\s*((?:Herr|Frau)?[ \t]*(?:Dr\.[ \t]*)?"
+                      r"[A-ZÄÖÜ][\w\-äöüß]+(?:[ \t]+[A-ZÄÖÜ][\w\-äöüß]+){0,3})", text or "")
+    if match:
+        return match.group(1).strip()
+    person = _PERSON_RE.search(text or "")
+    return person.group(0) if person else ""
 
 
 def apply_detail(job: Job, state: dict[str, Any]) -> Job:
-    """Fill a Job with the data of its detail page."""
+    """Fill a Job with everything on its detail page (job ad + employer profile)."""
+    from email_finder import extract_emails
+
     detail = state.get("jobdetail")
     if not isinstance(detail, dict):
         raise StateNotFound("No job detail data on the page.")
     employer = state.get("arbeitgeberdarstellung") or {}
+
+    job.title = detail.get("stellenangebotsTitel") or job.title
+    job.company = detail.get("firma") or employer.get("firma") or job.company
+    beruf = detail.get("hauptberuf") or ""
+    if is_elektroniker(beruf):
+        job.beruf, job.specialty = beruf, specialty_of(beruf)
     job.description = detail.get("stellenangebotsBeschreibung") or job.description
     education = detail.get("geforderterBildungsabschluss") or ""
-    job.education = _BILDUNG.get(education, education.replace("_", " ").title())
-    job.start = ((detail.get("eintrittszeitraum") or {}).get("von") or job.start)
-    loc = _address((detail.get("stellenlokationen") or [None])[0])
-    for key, value in loc.items():
-        if value:
-            setattr(job, key, value)
-    links = employer.get("links") or []
-    homepage = next((l.get("url") for l in links if l.get("art") == "Homepage"), None)
-    job.homepage = homepage or (links[0].get("url") if links else "") or ""
-    job.company_size = str(employer.get("betriebsgroesse") or "")
+    job.education = _BILDUNG.get(education, _label(education))
+    job.start = (detail.get("eintrittszeitraum") or {}).get("von") or job.start
+    job.published = detail.get("datumErsteVeroeffentlichung") or job.published
+    job.changed = (detail.get("aenderungsdatum") or "")[:10]
+    locations = detail.get("stellenlokationen") or []
+    if locations:
+        for key, value in _address(locations[0]).items():
+            if value:
+                setattr(job, key, value)
+        job.locations = [a for a in (_format_address(loc.get("adresse")) for loc in locations) if a]
+    job.pay_per_year = [int(detail[f"ausbildungsverguetungJahr{i}"]) for i in range(1, 5)
+                        if isinstance(detail.get(f"ausbildungsverguetungJahr{i}"), (int, float))]
+    job.pay_note = _label(detail.get("verguetungsangabe"))
+    job.working_time = ", ".join(label for key, label in _WORKING_TIME if detail.get(key))
+    job.contract = _label(detail.get("vertragsdauer"))
+    job.chiffre = str(detail.get("chiffrenummer") or "")
+    job.supported_by_ba = bool(detail.get("istBetreut"))
     job.external_url = detail.get("externeURL") or ""
-    # E-mail addresses written in the ad itself (job text, employer info).
-    from email_finder import extract_emails  # local import: keeps the parser module standalone
-    ad_text = "\n".join(str(x) for x in (detail.get("stellenangebotsBeschreibung"), employer.get("beschreibung"),
-                                         employer.get("kontaktinformationen")) if x)
-    ad_emails = extract_emails(ad_text)
-    if ad_emails and not job.emails:
-        job.emails = ad_emails
-        job.email_source = "BA-Anzeige (Stellentext)"
+    job.partner_name = detail.get("allianzpartnerName") or ""
+    if job.partner_name == "arbeitsagentur.de":
+        job.partner_name = ""
+
+    # Employer profile
+    links = employer.get("links") or []
+    homepage = next((l.get("url") for l in links if (l.get("art") or "").lower() == "homepage"), None)
+    job.homepage = homepage or (links[0].get("url") if links else "") or ""
+    job.other_links = [f"{l.get('art') or 'Link'}: {l.get('url')}" for l in links
+                       if l.get("url") and l.get("url") != job.homepage]
+    job.social_links = [f"{l.get('art') or 'Link'}: {l.get('url')}" for l in employer.get("socialmedialinks") or []
+                        if l.get("url")]
+    job.employer_description = _strip_markdown(employer.get("beschreibung") or "")
+    job.company_size = str(employer.get("betriebsgroesse") or "")
+    job.founded = str(employer.get("gruendungsjahr") or "")
+    job.headquarters = employer.get("hauptsitz") or ""
+    job.benefits = list(employer.get("mitarbeitervorteile") or [])
+    job.employer_contact = _strip_markdown(employer.get("kontaktinformationen") or "")
+
+    # E-mail / phone / Ansprechpartner written in the ad or the employer profile.
+    if not job.emails:
+        for text, source in ((job.description, "BA-Anzeige (Stellentext)"),
+                             (job.employer_contact, "BA-Arbeitgeberprofil"),
+                             (job.employer_description, "BA-Arbeitgeberprofil")):
+            found = extract_emails(text)
+            if found:
+                job.emails, job.email_source = found, source
+                break
     if not job.phones:
-        job.phones = parse_contact_text(detail.get("stellenangebotsBeschreibung") or "")["phones"][:2]
-    job.company = detail.get("firma") or job.company
+        for text in (job.employer_contact, job.description):
+            phones = parse_contact_text(text)["phones"]
+            if phones:
+                job.phones = [f"Telefon: {p}" for p in phones[:2]]
+                break
+    if not job.contact_person:
+        job.contact_person = _find_person(job.description)
+    return job
+
+
+def _phone(number: dict | None) -> str:
+    """{laendervorwahl:'+49', vorwahl:'0228', rufnummer:'3911234'} -> '+49 228 3911234'."""
+    if not number or not number.get("rufnummer"):
+        return ""
+    country = (number.get("laendervorwahl") or "").strip()
+    area = (number.get("vorwahl") or "").strip()
+    if country and area.startswith("0"):
+        area = area[1:]
+    return " ".join(x for x in (country, area, number["rufnummer"].strip()) if x)
+
+
+def find_kontaktdaten(data: Any) -> dict | None:
+    """The contact data object (with 'angebotskontakt') somewhere inside a JSON response."""
+    if isinstance(data, dict):
+        if isinstance(data.get("angebotskontakt"), dict):
+            return data
+        for value in data.values():
+            found = find_kontaktdaten(value)
+            if found:
+                return found
+    elif isinstance(data, list):
+        for value in data:
+            found = find_kontaktdaten(value)
+            if found:
+                return found
+    return None
+
+
+def apply_kontaktdaten(job: Job, kontaktdaten: dict) -> Job:
+    """Fill the contact fields from the contact data the page loads after the
+    Sicherheitsabfrage (Ansprechpartner, e-mail, phone, address, how to apply)."""
+    contact = kontaktdaten.get("angebotskontakt") or {}
+    name = contact.get("name") or {}
+    person = " ".join(x for x in (_ANREDE.get(contact.get("anrede") or "", ""), name.get("titel"),
+                                  name.get("vorname"), name.get("vorsatzwort"), name.get("nachname")) if x)
+    if person:
+        job.contact_person = person
+    job.contact_position = contact.get("position") or job.contact_position
+    address = _format_address(contact.get("postadresse"))
+    firma = contact.get("firma") or ""
+    job.contact_address = ", ".join(x for x in (firma, address) if x) or job.contact_address
+    email = (contact.get("emailadresse") or "").strip().lower()
+    if email:
+        job.emails = [email] + [e for e in job.emails if e != email]
+        job.email_source = "BA-Kontaktdaten"
+    phones = [f"{label}: {number}" for label, number in (
+        ("Telefon", _phone(contact.get("telefonnummer"))), ("Mobil", _phone(contact.get("mobilnummer"))),
+        ("Fax", _phone(contact.get("faxnummer")))) if number]
+    if phones:
+        job.phones = phones
+    job.application_methods = [label for key, label in _APPLICATION if kontaktdaten.get(key)]
+    job.application_url = kontaktdaten.get("urlBewerbungsformular") or ""
+    job.required_documents = _strip_markdown(str(kontaktdaten.get("geforderteAnlagen") or ""))
     return job
 
 

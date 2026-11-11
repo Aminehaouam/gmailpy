@@ -135,7 +135,7 @@ def test_store_and_csv(tmp_path):
     raw = target.read_bytes()
     assert raw.startswith(b"\xef\xbb\xbf")                       # BOM for Excel
     rows = list(csv.reader(io.StringIO(raw.decode("utf-8-sig")), delimiter=";"))
-    assert rows[0][:3] == ["Gefunden am", "Fachrichtung", "Firma"]
+    assert rows[0][:3] == ["Gefunden am", "Firma", "Fachrichtung"]
     assert "Müller & Söhne GmbH" in rows[2] and "a@b.de" in rows[2]
 
 
@@ -277,7 +277,7 @@ def test_window_shows_results_and_captcha_alert(tmp_path, monkeypatch):
         app.update()
         values = [app.tree.item(i)["values"] for i in app.tree.get_children()]
         assert len(values) == 2
-        statuses = {v[2]: v[5] for v in values}
+        statuses = {v[2]: v[6] for v in values}
         assert statuses == {"Firma 0": "Kontakt ✓", "Firma 1": "Sicherheitsabfrage offen"}
         assert app.last_summary["opened"] == 2 and sounds == ["alert", "done"]
         assert (tmp_path / "settings.json").exists()
@@ -287,18 +287,15 @@ def test_window_shows_results_and_captcha_alert(tmp_path, monkeypatch):
         gc.collect()
 
 
-# -- e-mail search ----------------------------------------------------------
+# -- complete listing data ----------------------------------------------------
 
-from ba_browser import fill_missing_emails  # noqa: E402
-from email_finder import (  # noqa: E402
-    candidate_links,
-    company_tokens,
-    decode_result_link,
-    extract_emails,
-    looks_like_company_site,
-    rank_emails,
-    urls_in_text,
-)
+from ba_parser import apply_kontaktdaten, find_kontaktdaten  # noqa: E402
+from email_finder import extract_emails  # noqa: E402
+
+
+def detail(name):
+    st = page(name)
+    return apply_detail(Job(st["jobdetail"]["referenznummer"], "", "", "", ""), st)
 
 
 def test_extract_emails_plain_obfuscated_and_mailto():
@@ -310,101 +307,101 @@ def test_extract_emails_plain_obfuscated_and_mailto():
         ["ausbildung@stadtwerke-bochum.de", "jobs@x-y.de"]
 
 
-def test_rank_prefers_application_addresses_on_company_domain():
-    emails = ["info@firma.de", "max.mustermann@firma.de", "ausbildung@firma.de", "bewerbung@other.de"]
-    assert rank_emails(emails, "https://www.firma.de")[:2] == ["ausbildung@firma.de", "info@firma.de"]
-
-
-def test_company_site_check():
-    assert company_tokens("Barth & Kerner GmbH") == ["barth", "kerner"]
-    assert looks_like_company_site("https://deutsche-steinzeug.de/de", "Deutsche Steinzeug Solar Ceramics GmbH")
-    assert not looks_like_company_site("https://www.db.com/", "Deutsche Steinzeug Solar Ceramics GmbH")
-    assert not looks_like_company_site("https://de.indeed.com/cmp/barth", "Barth und Kerner GmbH")
-    assert looks_like_company_site("https://www.barth-kerner.de", "Barth und Kerner GmbH")
-    assert looks_like_company_site("https://www.example-energie.de", "Ostwind GmbH", "Ostwind GmbH – Startseite")
-
-
-def test_search_result_links_are_decoded():
-    assert decode_result_link("https://www.bing.com/ck/a?!&&p=x&u=a1aHR0cHM6Ly93d3cuZGIuY29tLw&ntb=1") == \
-        "https://www.db.com/"
-    assert decode_result_link("https://www.google.com/url?q=https://firma.de/&sa=U") == "https://firma.de/"
-    assert decode_result_link("https://firma.de/x") == "https://firma.de/x"
-
-
-def test_search_queries():
-    from email_finder import search_queries
-    assert search_queries("YNCORIS", "Hürth, Rheinland") == ["YNCORIS Hürth", "YNCORIS"]
-    assert search_queries("Krüger GmbH & Co. KG", "") == ["Krüger GmbH & Co. KG"]
-
-
-def test_website_pages_worth_visiting():
-    links = [("Karriere", "/karriere"), ("Ausbildung", "/karriere/ausbildung"), ("Produkte", "/produkte"),
-             ("Kontakt", "/kontakt"), ("Impressum", "/impressum"), ("Facebook", "https://facebook.com/x"),
-             ("Datenblatt", "/x.pdf")]
-    assert candidate_links(links, "https://www.firma.de/") == [
-        "https://www.firma.de/karriere", "https://www.firma.de/karriere/ausbildung",
-        "https://www.firma.de/kontakt", "https://www.firma.de/impressum"]
-    assert urls_in_text("Mehr unter www.firma.de/karriere. Oder https://jobs.firma.de!") == \
-        ["https://www.firma.de/karriere", "https://jobs.firma.de"]
-
-
-def test_email_in_ad_text_is_found():
-    """Real ad: the application address is written in the job text."""
-    job = Job("10000-1208628753-S", "", "Elektroniker/in - Betriebstechnik", "Betriebstechnik", "")
-    apply_detail(job, page("detail.html"))
-    assert job.emails == ["bewerbung.witterschlick@deutsche-steinzeug.de"]
+def test_email_in_ad_text_lanxess():
+    job = detail("detail_lanxess_email_in_text.html")
+    assert job.emails == ["ausbildung@lanxess.com"]
     assert job.email_source == "BA-Anzeige (Stellentext)"
+    assert job.homepage == "http://karriere.lanxess.de/de/startseite/"
 
 
-def test_company_cache(tmp_path):
+def test_email_in_employer_profile_deutsche_steinzeug():
+    """Real ad whose application address the first version missed."""
+    job = detail("detail.html")
+    assert job.emails == ["bewerbung.witterschlick@deutsche-steinzeug.de"]
+    assert job.email_source == "BA-Arbeitgeberprofil"
+    assert job.homepage == "https://www.deutsche-steinzeug.de"
+    assert job.founded == "1755" and job.company_size == "950" and job.benefits
+
+
+def test_pay_and_employer_profile_ford():
+    job = detail("detail_ford_pay.html")
+    assert job.pay_per_year == [1261, 1328, 1419, 1485]
+    assert job.pay_text() == "1. Jahr 1.261 €, 2. Jahr 1.328 €, 3. Jahr 1.419 €, 4. Jahr 1.485 €"
+    assert job.homepage == "http://www.azubi-bei-ford.de"
+    assert job.working_time == "Vollzeit" and job.education.startswith("Qualifizierter")
+    assert job.locations == ["Henry-Ford-Str. 1, 50735 Köln"]
+
+
+def test_employer_contact_block_deutsche_bahn():
+    job = detail("detail_db_employer_contact.html")
+    assert "Potsdamer Platz 2" in job.employer_contact
+    assert job.phones == ["Telefon: +49 30 297 24707"]
+    assert any(link.startswith("Facebook:") for link in job.social_links)
+    assert job.homepage.startswith("https://")
+
+
+def test_ansprechpartner_and_phone_in_text_krueger():
+    job = detail("detail_krueger_person_in_text.html")
+    assert job.contact_person == "Frau Invidia"
+    assert job.phones == ["Telefon: 02202 105-5150"]
+    assert job.external_url and job.partner_name == "On-apply GmbH"
+    assert job.locations == ["Köln", "51469 Bergisch Gladbach"]
+
+
+KONTAKTDATEN = {   # structure of the data the page loads after the Sicherheitsabfrage
+    "bewerbungPerEMail": True, "bewerbungSchriftlich": True, "bewerbungUeberInternet": True,
+    "urlBewerbungsformular": "https://firma.de/karriere/bewerben",
+    "geforderteAnlagen": "Lebenslauf, letzte zwei Zeugnisse",
+    "angebotskontakt": {
+        "firma": "Muster Elektrotechnik GmbH", "anrede": "FRAU", "position": "Ausbildungsleitung",
+        "name": {"titel": "Dr.", "vorname": "Maria", "nachname": "Müller"},
+        "postadresse": {"strasse": "Hauptstr.", "hausnummer": "5", "plz": "50667", "ort": "Köln"},
+        "telefonnummer": {"laendervorwahl": "+49", "vorwahl": "0221", "rufnummer": "123456"},
+        "mobilnummer": {"laendervorwahl": "+49", "vorwahl": "0171", "rufnummer": "9876543"},
+        "emailadresse": "Ausbildung@Muster-Elektro.de",
+    },
+}
+
+
+def test_contact_data_after_sicherheitsabfrage():
+    job = Job("R", "t", "Elektroniker/in", "", "Muster", emails=["info@muster-elektro.de"])
+    apply_kontaktdaten(job, find_kontaktdaten({"wrapper": [{"x": 1}, KONTAKTDATEN]}))
+    assert job.contact_person == "Frau Dr. Maria Müller"
+    assert job.contact_position == "Ausbildungsleitung"
+    assert job.emails == ["ausbildung@muster-elektro.de", "info@muster-elektro.de"]
+    assert job.email_source == "BA-Kontaktdaten"
+    assert job.phones == ["Telefon: +49 221 123456", "Mobil: +49 171 9876543"]
+    assert job.contact_address == "Muster Elektrotechnik GmbH, Hauptstr. 5, 50667 Köln"
+    assert job.application_methods == ["per E-Mail", "online (Website des Arbeitgebers)", "schriftlich (Post)"]
+    assert job.application_url == "https://firma.de/karriere/bewerben"
+    assert job.required_documents == "Lebenslauf, letzte zwei Zeugnisse"
+    assert find_kontaktdaten({"nothing": "here"}) is None
+
+
+def test_exports_contain_everything(tmp_path):
+    import json as _json
     store = JobStore(tmp_path / "jobs.sqlite3")
-    assert store.company_get("Firma GmbH") is None
-    job = Job("R1", "t", "Elektroniker/in", "", "Firma  GmbH", emails=["ausbildung@firma.de"],
-              website="https://firma.de", email_source="Firmenwebsite (firma.de)")
-    store.company_put(job)
-    assert store.company_get("firma gmbh")["emails"] == ["ausbildung@firma.de"]
-    store.company_put(Job("R2", "t", "Elektroniker/in", "", "Nichts AG"))
-    assert store.company_get("Nichts AG") == {"website": "", "emails": [], "source": ""}
+    job = detail("detail_ford_pay.html")
+    apply_kontaktdaten(job, KONTAKTDATEN)
+    store.save(job)
+    store.export_csv(tmp_path / "out.csv")
+    rows = list(csv.reader(io.StringIO((tmp_path / "out.csv").read_text(encoding="utf-8-sig")), delimiter=";"))
+    row = dict(zip(rows[0], rows[1]))
+    assert row["Ansprechpartner"] == "Frau Dr. Maria Müller" and row["Position"] == "Ausbildungsleitung"
+    assert row["E-Mail"].startswith("ausbildung@muster-elektro.de")
+    assert row["Firmenwebsite"] == "http://www.azubi-bei-ford.de"
+    assert row["Ausbildungsvergütung"].startswith("1. Jahr 1.261 €")
+    assert "Stellenbeschreibung" in row and row["Stellenbeschreibung"]
+    store.export_json(tmp_path / "out.json")
+    data = _json.loads((tmp_path / "out.json").read_text(encoding="utf-8"))
+    assert data[0]["contact_person"] == "Frau Dr. Maria Müller" and data[0]["url"].endswith(job.refnr)
 
 
-class WebFakeSession(FakeSession):
-    def __init__(self, pages, websites):
-        super().__init__(pages)
-        self.websites = websites
-        self.web_lookups = []
-
-    def fetch_detail(self, job, *, want_contact, on_captcha, on_captcha_done, captcha_timeout):
-        self.opened.append(job.refnr)
-        job.contact_status = "none"
-        return job
-
-    def find_email_on_website(self, job, *, on_captcha, on_captcha_done, captcha_timeout):
-        self.web_lookups.append(job.company)
-        if job.company in self.websites:
-            job.website, job.emails = self.websites[job.company]
-            job.email_source, job.contact_status = "Firmenwebsite (x)", "ok"
-        return job
-
-
-def test_run_looks_up_email_on_website_once_per_company(tmp_path):
-    store = JobStore(tmp_path / "jobs.sqlite3")
-    pg = make_page(["Betriebstechnik", "Betriebstechnik", "Betriebstechnik"], 1, last=1)
-    pg.jobs[1].company = pg.jobs[0].company          # two ads of the same company
-    session = WebFakeSession([pg], {"Firma 0": ("https://firma0.de", ["ausbildung@firma0.de"])})
-    run(session, RunSettings(specialties=ALL), known=lambda r: False, save=store.save, events=RunEvents(),
-        company_get=store.company_get, company_put=store.company_put)
-    assert session.web_lookups == ["Firma 0", "Firma 2"]   # cached for the second ad
-    emails = {job.refnr: job.emails for job, _ in store.all()}
-    assert emails == {"P1-0": ["ausbildung@firma0.de"], "P1-1": ["ausbildung@firma0.de"], "P1-2": []}
-
-
-def test_fill_missing_emails_uses_ad_text_first(tmp_path):
-    store = JobStore(tmp_path / "jobs.sqlite3")
-    with_text = Job("A", "t", "Elektroniker/in", "", "Text GmbH", description="Mail: jobs@text-gmbh.de")
-    on_web = Job("B", "t", "Elektroniker/in", "", "Web GmbH")
-    done = Job("C", "t", "Elektroniker/in", "", "Fertig GmbH", emails=["x@fertig.de"])
-    session = WebFakeSession([], {"Web GmbH": ("https://web.de", ["bewerbung@web.de"])})
-    summary = fill_missing_emails(session, [with_text, on_web, done], RunSettings(), save=store.save,
-                                  events=RunEvents(), company_get=store.company_get, company_put=store.company_put)
-    assert summary["found"] == 2 and session.web_lookups == ["Web GmbH"]
-    assert with_text.emails == ["jobs@text-gmbh.de"] and on_web.emails == ["bewerbung@web.de"]
+def test_job_summary_lists_contact_first():
+    from jobfinder_gui import job_summary
+    job = detail("detail_ford_pay.html")
+    apply_kontaktdaten(job, KONTAKTDATEN)
+    text = job_summary(job)
+    assert text.index("Ansprechpartner: Frau Dr. Maria Müller – Ausbildungsleitung") < text.index("STELLE")
+    assert "Firmenwebsite: http://www.azubi-bei-ford.de" in text
+    assert "Ausbildungsvergütung: 1. Jahr 1.261 €" in text

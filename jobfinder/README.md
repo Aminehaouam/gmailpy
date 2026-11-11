@@ -16,39 +16,32 @@ your browser, and tells you when the site asks for a **Sicherheitsabfrage**
    Antriebstechnik, Gebäudesystemintegration, … and new/other ones).
    IT-System-Elektroniker/in, Industrieelektriker/in, Elektroanlagenmonteur/in
    etc. are left out.
-4. Opens each job at a calm pace and collects: title, specialty, company,
-   address, start date, required school leaving certificate, employer
-   homepage, description and – if you want – the **contact details**
-   (contact person, e-mail, phone). Jobs from partner portals get the link
-   to apply there.
-5. **Sicherheitsabfrage:** when the contact details are protected, the app
-   plays an alert sound (repeated every 30 s), shows a notice in the corner of
-   the screen and brings the browser to the front with the text field ready.
-   You type the characters and click *Absenden*; the app notices and
-   continues automatically. You can also skip that job's contact details.
+4. Opens each job at a calm pace and collects **everything in the BA
+   listing** (no other websites are visited):
+   * **Kontakt:** Ansprechpartner (with position), e-mail, phone / mobile /
+     fax, contact address, how to apply (e-mail, online form, post, phone,
+     in person), online application link, required documents;
+   * **Firmenwebsite** (the employer's homepage link in the listing), other
+     links and social-media links;
+   * **Stelle:** title, Beruf and specialty, all places of work, start date,
+     training pay per year, working time, contract length, required school
+     leaving certificate, publication date, reference and Chiffre number,
+     partner portal link, full job description;
+   * **Arbeitgeber:** description, size, founding year, headquarters,
+     benefits and the contact block of the employer profile.
+   E-mail addresses are taken from the contact data, the job text, the
+   employer profile and every e-mail link on the page.
+5. **Sicherheitsabfrage:** the Ansprechpartner, e-mail and phone of the
+   contact box are protected. The app plays an alert sound (repeated every
+   30 s), shows a notice in the corner of the screen and brings the browser to
+   the front with the text field ready. You type the characters and click
+   *Absenden*; the app reads the contact data and continues automatically.
+   You can also skip that job's contact data (it is tried again next run).
    The captcha is never solved automatically.
-6. **Finding the e-mail address**, in this order:
-   * the BA ad itself – job text, employer info and every e-mail link on the
-     page (many ads write "Bewerbung an bewerbung@firma.de" in the text);
-   * the contact box behind the Sicherheitsabfrage (skipped automatically
-     when the ad already contains an e-mail address – fewer captchas);
-   * the **company website**: the homepage linked in the BA ad, a web
-     address in the job text, or a **Google search** for company + place
-     (Bing as fallback). A search result is only used if the company name
-     appears in its web address or page title, so job portals and unrelated
-     sites are never taken. On the website the app reads the start page,
-     the Karriere/Ausbildung/Bewerbung, Kontakt and Impressum pages.
-     Application addresses (bewerbung@, ausbildung@, karriere@, personal@,
-     recruiting@ …) come first, then info@/kontakt@; datenschutz@, noreply@,
-     vertrieb@ and similar are ignored. If Google asks "Ich bin kein
-     Roboter", you get the same alert as for the Sicherheitsabfrage (or let
-     the app continue with Bing).
-   Each company is searched once (the result is remembered; "nothing found"
-   is tried again after 7 days). **Fehlende E-Mails suchen** fills in
-   addresses for jobs collected earlier.
-7. Everything is saved; the next run skips jobs already collected (jobs whose
-   contact details are still missing are opened again). **Als Excel/CSV
-   speichern** exports the list.
+6. Everything is saved; the next run skips jobs already collected. **Als
+   Excel/CSV speichern** exports all fields – choose *JSON* in the save
+   dialog to get the complete data in one file (e.g. for Claude, which can
+   then look up anything else).
 
 The cookie banner of the site is answered with *Alle Cookies ablehnen*.
 

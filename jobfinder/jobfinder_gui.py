@@ -21,8 +21,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
 from alert_sound import play_attention, play_done
-from ba_browser import (BrowserNotAvailable, BrowserSession, RunEvents, RunSettings, StopRequested,
-                        fill_missing_emails, run)
+from ba_browser import BrowserNotAvailable, BrowserSession, RunEvents, RunSettings, StopRequested, run
 from ba_parser import KNOWN_SPECIALTIES, OTHER_SPECIALTY, Job
 from jobfinder_db import JobStore
 
@@ -44,8 +43,7 @@ STATUS_TEXT = {
 RADIUS_CHOICES = ["ganz Deutschland", "10 km", "25 km", "50 km", "100 km", "200 km"]
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "wo": "", "umkreis": "50 km", "max_jobs": 30, "want_contact": True, "find_on_website": True,
-    "skip_known": True,
+    "wo": "", "umkreis": "50 km", "max_jobs": 30, "want_contact": True, "skip_known": True,
     "specialties": KNOWN_SPECIALTIES + [OTHER_SPECIALTY],
 }
 
@@ -71,6 +69,47 @@ def load_settings(path: Path) -> dict[str, Any]:
     except (OSError, ValueError):
         pass
     return settings
+
+
+def job_summary(job: Job) -> str:
+    """Everything known about a job, as readable text (details pane)."""
+    def line(label: str, value: Any) -> str | None:
+        if isinstance(value, list):
+            value = ", ".join(str(v) for v in value)
+        return f"{label}: {value}" if value else None
+
+    address = ", ".join(x for x in (job.street, f"{job.plz} {job.ort}".strip()) if x)
+    person = job.contact_person + (f" – {job.contact_position}" if job.contact_position else "")
+    blocks: list[tuple[str, list]] = [
+        ("", [job.title, job.company]),
+        ("KONTAKT", [line("Ansprechpartner", person), line("E-Mail", job.emails),
+                     line("E-Mail gefunden in", job.email_source), ", ".join(job.phones),
+                     line("Kontaktadresse", job.contact_address), line("Firmenwebsite", job.homepage),
+                     line("Bewerbung", job.application_methods), line("Online-Bewerbung", job.application_url),
+                     line("Bewerbung über Partnerseite", job.external_url),
+                     line("Geforderte Unterlagen", job.required_documents)]),
+        ("STELLE", [line("Beruf", job.beruf), line("Arbeitsort", address),
+                    line("Weitere Arbeitsorte", job.locations[1:]), line("Beginn", job.start),
+                    line("Ausbildungsvergütung", job.pay_text() or job.pay_note),
+                    line("Arbeitszeit", job.working_time), line("Vertragsdauer", job.contract),
+                    line("Schulabschluss", job.education), line("Veröffentlicht", job.published),
+                    line("Chiffre", job.chiffre), line("Referenznummer", job.refnr)]),
+        ("ARBEITGEBER", [line("Betriebsgröße", job.company_size), line("Gegründet", job.founded),
+                         line("Hauptsitz", job.headquarters), line("Vorteile", job.benefits),
+                         line("Kontakt im Profil", job.employer_contact), line("Weitere Links", job.other_links),
+                         line("Social Media", job.social_links), job.employer_description]),
+        ("STELLENBESCHREIBUNG", [job.description.strip(" \n\t-")]),
+        ("", [job.url]),
+    ]
+    out: list[str] = []
+    for heading, items in blocks:
+        content = [x for x in items if x]
+        if content:
+            if heading:
+                out.append(heading)
+            out.extend(content)
+            out.append("")
+    return "\n".join(out).strip()
 
 
 def _style(root: tk.Tk) -> None:
@@ -112,26 +151,19 @@ def _style(root: tk.Tk) -> None:
 class CaptchaAlert(tk.Toplevel):
     """Always-on-top notice while the user solves the Sicherheitsabfrage."""
 
-    def __init__(self, parent: "JobFinderApp", job: Job, kind: str = "ba"):
+    def __init__(self, parent: "JobFinderApp", job: Job):
         super().__init__(parent)
-        self.title("Sicherheitsabfrage" if kind == "ba" else "Google-Bestätigung")
+        self.title("Sicherheitsabfrage")
         self.configure(background=C["card"])
         self.attributes("-topmost", True)
         self.resizable(False, False)
         frame = ttk.Frame(self, style="Card.TFrame", padding=18)
         frame.pack(fill="both", expand=True)
-        if kind == "ba":
-            heading = "Bitte Sicherheitsabfrage lösen"
-            text = (f"Für die Kontaktdaten von „{job.company}“ fragt die Jobsuche nach den Zeichen aus dem "
-                    "Bild.\n\nDas Browserfenster ist jetzt vorne: Zeichen eingeben und „Absenden“ klicken. "
-                    "Danach geht es automatisch weiter.")
-            skip = "Diese Stelle ohne Kontakt überspringen"
-        else:
-            heading = "Bitte Google-Bestätigung durchführen"
-            text = (f"Bei der Suche nach der Website von „{job.company}“ fragt Google, ob Sie ein Mensch sind."
-                    "\n\nDas Browserfenster ist jetzt vorne: „Ich bin kein Roboter“ bestätigen. "
-                    "Danach geht es automatisch weiter.")
-            skip = "Ohne Google weitermachen (Bing)"
+        heading = "Bitte Sicherheitsabfrage lösen"
+        text = (f"Für die Kontaktdaten von „{job.company}“ (Ansprechpartner, E-Mail, Telefon) fragt die "
+                "Jobsuche nach den Zeichen aus dem Bild.\n\nDas Browserfenster ist jetzt vorne: Zeichen "
+                "eingeben und „Absenden“ klicken. Danach geht es automatisch weiter.")
+        skip = "Diese Stelle ohne Kontaktdaten überspringen"
         ttk.Label(frame, text=heading, style="Card.TLabel", font=("", 13, "bold")).pack(anchor="w")
         ttk.Label(frame, style="Card.TLabel", wraplength=420, justify="left", text=text).pack(
             anchor="w", pady=(8, 12))
@@ -200,7 +232,6 @@ class JobFinderApp(tk.Tk):
         self.radius_var = tk.StringVar(value=self.settings["umkreis"])
         self.max_var = tk.IntVar(value=int(self.settings["max_jobs"]))
         self.contact_var = tk.BooleanVar(value=bool(self.settings["want_contact"]))
-        self.website_var = tk.BooleanVar(value=bool(self.settings["find_on_website"]))
         self.skip_var = tk.BooleanVar(value=bool(self.settings["skip_known"]))
         rows = [("Ort / PLZ (leer = ganz Deutschland):", ttk.Entry(search, textvariable=self.wo_var, width=26)),
                 ("Umkreis:", ttk.Combobox(search, textvariable=self.radius_var, values=RADIUS_CHOICES,
@@ -212,16 +243,11 @@ class JobFinderApp(tk.Tk):
             widget.grid(row=row * 2 + 1, column=0, sticky="w", pady=(0, 8))
         ttk.Checkbutton(search, text="Kontaktdaten abrufen\n(manchmal mit Sicherheitsabfrage)",
                         variable=self.contact_var, style="Card.TCheckbutton").grid(row=6, column=0, sticky="w")
-        ttk.Checkbutton(search, text="E-Mail auf der Firmenwebsite suchen\n(BA-Link oder Google)",
-                        variable=self.website_var, style="Card.TCheckbutton").grid(row=7, column=0, sticky="w",
-                                                                                     pady=(4, 0))
         ttk.Checkbutton(search, text="Bereits gesammelte Stellen überspringen",
                         variable=self.skip_var, style="Card.TCheckbutton").grid(row=8, column=0, sticky="w",
                                                                                   pady=(4, 10))
         self.start_button = ttk.Button(search, text="Suche starten", style="Accent.TButton", command=self.start)
         self.start_button.grid(row=9, column=0, sticky="ew")
-        self.emails_button = ttk.Button(search, text="Fehlende E-Mails suchen", command=self.start_emails)
-        self.emails_button.grid(row=10, column=0, sticky="ew", pady=(6, 0))
         self.stop_button = ttk.Button(search, text="Stopp", style="Danger.TButton", command=self.stop)
         self.stop_button.grid(row=11, column=0, sticky="ew", pady=(6, 0))
         self.stop_button.state(["disabled"])
@@ -259,8 +285,9 @@ class JobFinderApp(tk.Tk):
         ttk.Button(toolbar, text="Liste leeren", command=self.clear).pack(side="right")
         self.count_label = ttk.Label(toolbar, style="Card.TLabel", foreground=C["muted"])
         self.count_label.pack(side="right", padx=10)
-        columns = (("found", "Gefunden", 140), ("specialty", "Fachrichtung", 160), ("company", "Firma", 190),
-                   ("ort", "Ort", 110), ("email", "E-Mail", 190), ("status", "Kontakt", 150))
+        columns = (("found", "Gefunden", 135), ("specialty", "Fachrichtung", 150), ("company", "Firma", 180),
+                   ("ort", "Ort", 105), ("person", "Ansprechpartner", 150), ("email", "E-Mail", 180),
+                   ("status", "Kontakt", 140))
         self.tree = ttk.Treeview(results, columns=[c[0] for c in columns], show="headings", selectmode="browse")
         for key, title, width in columns:
             self.tree.heading(key, text=title, anchor="w")
@@ -301,7 +328,7 @@ class JobFinderApp(tk.Tk):
         if new:
             tags.append("new")
         item = self.tree.insert("", index, values=(
-            first_seen.replace("T", " ")[:16], job.specialty or "–", job.company, job.ort,
+            first_seen.replace("T", " ")[:16], job.specialty or "–", job.company, job.ort, job.contact_person,
             ", ".join(job.emails), STATUS_TEXT.get(job.contact_status, job.contact_status),
         ), tags=tags)
         self._items[item] = job
@@ -314,25 +341,7 @@ class JobFinderApp(tk.Tk):
         job = self.selected_job()
         text = ""
         if job:
-            address = ", ".join(x for x in (job.street, f"{job.plz} {job.ort}".strip()) if x)
-            lines = [job.title, f"{job.company} – {address}", f"Beruf: {job.beruf}",
-                     f"Beginn: {job.start}   Schulabschluss: {job.education or '–'}"]
-            if job.emails or job.phones:
-                lines.append("E-Mail: " + ", ".join(job.emails) + "   Telefon: " + ", ".join(job.phones))
-            if job.email_source:
-                lines.append(f"E-Mail gefunden in: {job.email_source}")
-            if job.website:
-                lines.append(f"Firmenwebsite: {job.website}")
-            if job.homepage:
-                lines.append(f"Homepage: {job.homepage}")
-            if job.external_url:
-                lines.append(f"Bewerbung über Partnerseite: {job.external_url}")
-            if job.contact_text:
-                lines += ["", "Kontakt:", job.contact_text]
-            if job.description:
-                lines += ["", job.description[:1500] + ("…" if len(job.description) > 1500 else "")]
-            lines += ["", job.url]
-            text = "\n".join(lines)
+            text = job_summary(job)
         self.details.configure(state="normal")
         self.details.delete("1.0", "end")
         self.details.insert("1.0", text)
@@ -354,10 +363,12 @@ class JobFinderApp(tk.Tk):
 
     def export(self) -> None:
         name = f"Elektroniker_Ausbildung_{datetime.now():%Y-%m-%d}.csv"
-        target = filedialog.asksaveasfilename(parent=self, defaultextension=".csv", initialfile=name,
-                                              filetypes=[("CSV (Excel)", "*.csv")])
+        target = filedialog.asksaveasfilename(
+            parent=self, defaultextension=".csv", initialfile=name,
+            filetypes=[("CSV für Excel", "*.csv"), ("JSON (alle Daten, z. B. für Claude)", "*.json")])
         if target:
-            count = self.store.export_csv(Path(target))
+            path = Path(target)
+            count = self.store.export_json(path) if path.suffix.lower() == ".json" else self.store.export_csv(path)
             self._set_status(f"{count} Stellen gespeichert in {target}")
 
     def clear(self) -> None:
@@ -375,42 +386,33 @@ class JobFinderApp(tk.Tk):
             wo=self.wo_var.get().strip(), umkreis=umkreis if self.wo_var.get().strip() else None,
             specialties={name for name, var in self.spec_vars.items() if var.get()},
             max_jobs=max(1, int(self.max_var.get() or 30)), want_contact=bool(self.contact_var.get()),
-            find_on_website=bool(self.website_var.get()), skip_known=bool(self.skip_var.get()))
+            skip_known=bool(self.skip_var.get()))
 
     def _save_settings(self, settings: RunSettings) -> None:
         data = {"wo": settings.wo, "umkreis": self.radius_var.get(), "max_jobs": settings.max_jobs,
-                "want_contact": settings.want_contact, "find_on_website": settings.find_on_website,
-                "skip_known": settings.skip_known,
+                "want_contact": settings.want_contact, "skip_known": settings.skip_known,
                 "specialties": sorted(settings.specialties)}
         try:
             self.settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError:
             pass
 
-    def start(self, mode: str = "search") -> None:
+    def start(self) -> None:
         if self.worker and self.worker.is_alive():
             return
         settings = self.current_settings()
-        if mode == "search" and not settings.specialties:
+        if not settings.specialties:
             messagebox.showinfo(APP_NAME, "Bitte mindestens eine Fachrichtung auswählen.", parent=self)
-            return
-        if mode == "emails" and not any(not job.emails for job, _ in self.store.all()):
-            self._set_status("Alle gesammelten Stellen haben bereits eine E-Mail-Adresse.")
             return
         self._save_settings(settings)
         self.stop_event.clear()
         self.skip_event.clear()
         self.new_refs: set[str] = set()
         self.start_button.state(["disabled"])
-        self.emails_button.state(["disabled"])
         self.stop_button.state(["!disabled"])
         self._set_status("Browser wird gestartet...")
-        self.worker = threading.Thread(target=self._work, args=(settings, mode), daemon=True, name="jobfinder")
+        self.worker = threading.Thread(target=self._work, args=(settings,), daemon=True, name="jobfinder")
         self.worker.start()
-
-    def start_emails(self) -> None:
-        """Find e-mail addresses for collected jobs that have none yet."""
-        self.start(mode="emails")
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -424,7 +426,7 @@ class JobFinderApp(tk.Tk):
     def _post(self, kind: str, *payload: Any) -> None:
         self.events.put((kind, payload))
 
-    def _work(self, settings: RunSettings, mode: str = "search") -> None:
+    def _work(self, settings: RunSettings) -> None:
         """Background thread: the whole browser session."""
         session = BrowserSession(self.home / "browser-profile", stop_event=self.stop_event,
                                  skip_event=self.skip_event, **self.browser_options)
@@ -432,21 +434,13 @@ class JobFinderApp(tk.Tk):
             status=lambda text: self._post("status", text),
             job=lambda job: self._post("job", job),
             specialties=lambda counts: self._post("specialties", counts),
-            captcha=lambda job, kind="ba": self._post("captcha", job, kind),
+            captcha=lambda job: self._post("captcha", job),
             captcha_done=lambda job, solved: self._post("captcha_done", job, solved),
         )
         try:
             session.start()
             self._post("status", f"Browser gestartet ({session.browser_name}).")
-            if mode == "emails":
-                missing = [job for job, _ in self.store.all() if not job.emails]
-                summary = fill_missing_emails(session, missing, settings, save=self.store.save, events=events,
-                                              company_get=self.store.company_get,
-                                              company_put=self.store.company_put)
-            else:
-                summary = run(session, settings, known=self.store.is_complete, save=self.store.save,
-                              events=events, company_get=self.store.company_get,
-                              company_put=self.store.company_put)
+            summary = run(session, settings, known=self.store.is_complete, save=self.store.save, events=events)
             self._post("done", summary)
         except StopRequested:
             self._post("done", {"stopped": True})
@@ -480,11 +474,10 @@ class JobFinderApp(tk.Tk):
             base = "Andere / ohne Fachrichtung" if name == OTHER_SPECIALTY else name
             check.configure(text=f"{base} ({counts[name]})" if counts.get(name) else base)
 
-    def _on_captcha(self, job: Job, kind: str = "ba") -> None:
-        what = "Sicherheitsabfrage" if kind == "ba" else "Google-Bestätigung"
-        self._set_status(f"{what} ({job.company}): bitte im Browser lösen.", warn=True)
+    def _on_captcha(self, job: Job) -> None:
+        self._set_status(f"Sicherheitsabfrage ({job.company}): bitte im Browser lösen.", warn=True)
         self._close_captcha()
-        self.captcha_window = CaptchaAlert(self, job, kind)
+        self.captcha_window = CaptchaAlert(self, job)
         self._remind()
         self._flash_taskbar()
 
@@ -522,7 +515,6 @@ class JobFinderApp(tk.Tk):
     def _finish(self) -> None:
         self._close_captcha()
         self.start_button.state(["!disabled"])
-        self.emails_button.state(["!disabled"])
         self.stop_button.state(["disabled"])
 
     def _on_done(self, summary: dict) -> None:
@@ -531,13 +523,9 @@ class JobFinderApp(tk.Tk):
         if summary.get("stopped"):
             self._set_status("Angehalten.")
             return
-        if summary.get("mode") == "emails":
-            self._set_status(f"Fertig: für {summary['found']} von {summary['opened']} Stellen eine E-Mail gefunden.")
-        else:
-            with_email = sum(1 for job, _ in self.store.all() if job.refnr in self.new_refs and job.emails)
-            self._set_status(f"Fertig: {summary['opened']} Stellen geöffnet ({with_email} mit E-Mail), "
-                             f"{summary['found']} passende gefunden, {summary['skipped']} bereits bekannt "
-                             "übersprungen.")
+        with_email = sum(1 for job, _ in self.store.all() if job.refnr in self.new_refs and job.emails)
+        self._set_status(f"Fertig: {summary['opened']} Stellen geöffnet ({with_email} mit E-Mail), "
+                         f"{summary['found']} passende gefunden, {summary['skipped']} bereits bekannt übersprungen.")
         self.done_sound(None)
 
     def _on_error(self, message: str) -> None:

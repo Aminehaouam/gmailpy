@@ -23,25 +23,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from email_finder import (
-    bing_url,
-    candidate_links,
-    decode_result_link,
-    domain_of,
-    extract_emails,
-    google_url,
-    is_portal,
-    looks_like_company_site,
-    rank_emails,
-    search_queries,
-    urls_in_text,
-)
+from email_finder import extract_emails
 from ba_parser import (
     Job,
     SearchPage,
     apply_detail,
+    apply_kontaktdaten,
     build_search_url,
     extract_state,
+    find_kontaktdaten,
     parse_contact_text,
     parse_search,
     specialty_selected,
@@ -73,18 +63,6 @@ _PAGE_DATA_JS = """
 })
 """
 
-_GOOGLE_RESULTS_JS = """
-() => Array.from(document.querySelectorAll('#search a[href], #rso a[href], #main a[href]'))
-        .filter(a => a.querySelector('h3'))
-        .map(a => [a.href, a.querySelector('h3').innerText])
-"""
-
-_BING_RESULTS_JS = """
-() => Array.from(document.querySelectorAll('li.b_algo h2 a, #b_results h2 a'))
-        .map(a => [a.href, a.innerText])
-"""
-
-
 class StopRequested(Exception):
     pass
 
@@ -114,8 +92,7 @@ class BrowserSession:
         self.browser_name = ""
         self._last_navigation = 0.0
         self._cookies_done = False
-        self._last_search = 0.0
-        self.search_engines = ["google", "bing"]
+        self._responses: list = []   # data responses of the current job page
 
     # -- life cycle ---------------------------------------------------------
     def start(self) -> None:
@@ -148,6 +125,10 @@ class BrowserSession:
             raise BrowserNotAvailable("No browser could be started.\n" + "\n".join(errors))
         self.page = self._context.pages[0] if self._context.pages else self._context.new_page()
         self.page.set_default_timeout(45000)
+        # Remember the data responses of each page: the contact data
+        # (Ansprechpartner, e-mail, phone) arrive as JSON after the
+        # Sicherheitsabfrage and are read from there.
+        self.page.on("response", self._remember_response)
         log.info("Browser started: %s", self.browser_name)
 
     def close(self) -> None:
@@ -161,6 +142,25 @@ class BrowserSession:
         self._pw = None
 
     # -- helpers --------------------------------------------------------------
+    def _remember_response(self, response) -> None:
+        try:
+            if "arbeitsagentur.de" in response.url and response.request.resource_type in ("xhr", "fetch"):
+                self._responses.append(response)
+        except Exception:
+            pass
+
+    def _contact_data_from_responses(self) -> dict | None:
+        for response in reversed(self._responses):
+            try:
+                if "json" not in (response.headers.get("content-type") or ""):
+                    continue
+                found = find_kontaktdaten(response.json())
+            except Exception:
+                continue
+            if found:
+                return found
+        return None
+
     def _check_stop(self) -> None:
         if self.stop_event.is_set():
             raise StopRequested()
@@ -177,6 +177,7 @@ class BrowserSession:
         """Open *url* and return the server-rendered HTML."""
         self._check_stop()
         self._pause()
+        self._responses = []
         response = self.page.goto(url, wait_until="domcontentloaded")
         self._last_navigation = time.monotonic()
         html = response.text() if response is not None else self.page.content()
@@ -217,44 +218,45 @@ class BrowserSession:
         job: Job,
         *,
         want_contact: bool,
-        on_captcha: Callable[..., None] = lambda job, kind="ba": None,
+        on_captcha: Callable[[Job], None] = lambda job: None,
         on_captcha_done: Callable[[Job, bool], None] = lambda job, solved: None,
         captcha_timeout: float = 600.0,
         load_timeout: float = 15.0,
     ) -> Job:
         html = self.goto(job.url)
-        apply_detail(job, extract_state(html))   # also finds e-mails written in the ad
+        apply_detail(job, extract_state(html))   # job ad + employer profile (incl. e-mails in the text)
         if not want_contact:
             self._emails_on_ba_page(job)
             return job
 
         state = self._wait_for_contact_box(load_timeout)
         if state["state"] == "captcha":
-            if job.emails:
-                # The ad already names an e-mail address: no need to bother the user.
-                log.info("Sicherheitsabfrage skipped for %s - e-mail found in the ad", job.company)
-                self._emails_on_ba_page(job)
-                job.contact_status = "ok"
-                return job
             log.info("Sicherheitsabfrage for %s - waiting for the user", job.company)
             self._focus_captcha()   # captcha visible and the text field focused first
-            on_captcha(job, "ba")
+            on_captcha(job)
             state = self._wait_for_user(captcha_timeout)
             solved = state["state"] == "content"
             on_captcha_done(job, solved)
             if not solved:
                 self._emails_on_ba_page(job)
-                job.contact_status = "ok" if job.emails else "captcha-skipped"
+                job.contact_status = "captcha-skipped"  # Ansprechpartner missing: retried next run
                 return job
         if state["state"] == "content":
+            time.sleep(0.5)  # let the contact data response finish
+            data = self._contact_data_from_responses()
+            if data:
+                apply_kontaktdaten(job, data)
             contact = parse_contact_text(state["text"])
+            if not job.contact_person and contact["person"]:
+                job.contact_person = contact["person"]
             if contact["emails"]:
                 job.emails = list(dict.fromkeys(contact["emails"] + job.emails))
                 job.email_source = "BA-Kontaktdaten"
-            job.phones = list(dict.fromkeys(contact["phones"] + job.phones))
-            job.contact_person, job.contact_text = contact["person"], contact["text"]
+            if not data and contact["phones"]:
+                job.phones = [f"Telefon: {p}" for p in contact["phones"]]
+            job.contact_text = contact["text"]
         self._emails_on_ba_page(job)
-        if job.emails or job.phones:
+        if job.emails or job.phones or job.contact_person:
             job.contact_status = "ok"
         else:
             # No contact data: partner-portal jobs are applied for on the partner site.
@@ -273,148 +275,6 @@ class BrowserSession:
             if not job.emails:
                 job.email_source = "BA-Anzeige"
             job.emails = job.emails + new
-
-    # -- company website ------------------------------------------------------
-    def _open_external(self, url: str, timeout: float = 20.0) -> dict | None:
-        """Open a page outside the BA site; returns title/text/links or None."""
-        self._check_stop()
-        wait = random.uniform(0.6, 1.3) - (time.monotonic() - self._last_navigation)
-        if wait > 0:
-            time.sleep(wait)
-        try:
-            self.page.goto(url, wait_until="domcontentloaded", timeout=int(timeout * 1000))
-            self._last_navigation = time.monotonic()
-            self.page.wait_for_timeout(700)   # let scripts insert contact blocks
-            try:
-                data = self.page.evaluate(_PAGE_DATA_JS)
-            except Exception:
-                # The page redirected while it was read: wait and read again.
-                self.page.wait_for_load_state("domcontentloaded", timeout=int(timeout * 1000))
-                self.page.wait_for_timeout(1000)
-                data = self.page.evaluate(_PAGE_DATA_JS)
-            data["url"] = self.page.url
-            return data
-        except StopRequested:
-            raise
-        except Exception as exc:
-            log.info("Could not open %s: %s", url, str(exc).splitlines()[0])
-            self._last_navigation = time.monotonic()
-            return None
-
-    def _search_results(self, engine: str, query: str, job: Job, on_captcha, on_captcha_done,
-                        captcha_timeout: float) -> list[tuple[str, str]]:
-        # Searches are spaced out to avoid Google's "unusual traffic" check.
-        wait = random.uniform(4.0, 7.0) - (time.monotonic() - self._last_search)
-        end = time.monotonic() + max(0.0, wait)
-        while time.monotonic() < end:
-            self._check_stop()
-            time.sleep(0.1)
-        self._last_search = time.monotonic()
-        url = google_url(query) if engine == "google" else bing_url(query)
-        if self._open_external(url) is None:
-            return []
-        if engine == "google":
-            if "consent.google" in self.page.url:
-                for name in ("Alle ablehnen", "Reject all"):
-                    try:
-                        button = self.page.get_by_role("button", name=name)
-                        if button.count():
-                            button.first.click(timeout=5000)
-                            self.page.wait_for_load_state("domcontentloaded", timeout=15000)
-                            break
-                    except Exception:
-                        pass
-            if "/sorry/" in self.page.url:
-                log.info("Google asks for a check (not a robot) - waiting for the user")
-                try:
-                    self.page.bring_to_front()
-                except Exception:
-                    pass
-                on_captcha(job, "google")
-                solved = self._wait_until(lambda: "/sorry/" not in self.page.url, captcha_timeout)
-                on_captcha_done(job, solved)
-                if not solved:
-                    return []
-                self.page.wait_for_timeout(1500)
-            script = _GOOGLE_RESULTS_JS
-        else:
-            script = _BING_RESULTS_JS
-        try:
-            results = self.page.evaluate(script)
-        except Exception:
-            return []
-        return [(decode_result_link(href), title) for href, title in results if href]
-
-    def _wait_until(self, condition: Callable[[], bool], timeout: float) -> bool:
-        end = time.monotonic() + timeout
-        self.skip_event.clear()
-        while time.monotonic() < end:
-            self._check_stop()
-            if self.skip_event.is_set():
-                self.skip_event.clear()
-                return False
-            try:
-                if condition():
-                    return True
-            except Exception:
-                pass
-            time.sleep(1.0)
-        return False
-
-    def find_company_website(self, job: Job, on_captcha=lambda job, kind="ba": None,
-                             on_captcha_done=lambda job, solved: None, captcha_timeout: float = 600.0) -> str:
-        """Company website: BA homepage link, a web address in the ad, or a
-        web search (Google, then Bing) - only accepted if the company name
-        appears in the domain or page title."""
-        candidates = [job.homepage] if job.homepage and not is_portal(job.homepage) else []
-        candidates += [u for u in urls_in_text(job.description) if not is_portal(u)]
-        for url in candidates:
-            if looks_like_company_site(url, job.company) or url == job.homepage:
-                return url
-        for engine in self.search_engines:
-            for query in search_queries(job.company, job.ort):
-                results = self._search_results(engine, query, job, on_captcha, on_captcha_done, captcha_timeout)
-                for url, title in results[:8]:
-                    if looks_like_company_site(url, job.company, title):
-                        log.info("Website for %s found via %s: %s", job.company, engine, url)
-                        return url
-        return candidates[0] if candidates else ""
-
-    def find_email_on_website(self, job: Job, *, on_captcha=lambda job, kind="ba": None,
-                              on_captcha_done=lambda job, solved: None, captcha_timeout: float = 600.0,
-                              max_pages: int = 5) -> Job:
-        """Visit the company website (start page, career/Ausbildung, Kontakt,
-        Impressum) and collect the e-mail addresses found there."""
-        site = self.find_company_website(job, on_captcha, on_captcha_done, captcha_timeout)
-        if not site:
-            log.info("No website found for %s", job.company)
-            return job
-        job.website = site
-        found: list[str] = []
-        first = self._open_external(site)
-        if first is None:
-            return job
-        base = first["url"]
-        found += extract_emails(first["text"], " ".join(first["mailtos"]))
-        best_page = base
-        for url in candidate_links([tuple(l) for l in first["links"]], base, limit=max_pages - 1):
-            if any(e.split("@")[0].startswith(("bewerbung", "ausbildung", "karriere", "personal", "jobs"))
-                   for e in found):
-                break  # an application address is already known
-            data = self._open_external(url)
-            if data is None:
-                continue
-            new = extract_emails(data["text"], " ".join(data["mailtos"]))
-            if new and not found:
-                best_page = data["url"]
-            found += new
-        if found:
-            ranked = rank_emails(list(dict.fromkeys(found)), base)
-            job.emails = list(dict.fromkeys(job.emails + ranked))
-            job.email_source = f"Firmenwebsite ({domain_of(best_page)})"
-            job.contact_status = "ok"
-            log.info("E-mail for %s on %s: %s", job.company, best_page, ranked[0])
-        return job
 
     def _wait_for_contact_box(self, timeout: float) -> dict:
         end = time.monotonic() + timeout
@@ -469,7 +329,6 @@ class RunSettings:
     max_jobs: int = 30
     max_pages: int = 20
     want_contact: bool = True
-    find_on_website: bool = True
     skip_known: bool = True
     captcha_timeout: float = 600.0
 
@@ -479,31 +338,12 @@ class RunEvents:
     status: Callable[[str], None] = lambda text: None
     job: Callable[[Job], None] = lambda job: None
     specialties: Callable[[dict], None] = lambda counts: None
-    captcha: Callable[..., None] = lambda job, kind="ba": None
+    captcha: Callable[[Job], None] = lambda job: None
     captcha_done: Callable[[Job, bool], None] = lambda job, solved: None
 
 
-def lookup_email(session: BrowserSession, job: Job, settings: RunSettings, events: RunEvents,
-                 company_get: Callable[[str], dict | None], company_put: Callable[[Job], None]) -> None:
-    """Find the e-mail on the company website (cached per company)."""
-    cached = company_get(job.company)
-    if cached is not None:
-        if cached.get("emails"):
-            job.emails = list(dict.fromkeys(job.emails + cached["emails"]))
-            job.email_source = cached.get("source") or "Firmenwebsite"
-            job.contact_status = "ok"
-        job.website = job.website or cached.get("website", "")
-        return  # searched recently (found or not): do not search again
-    events.status(f"Searching the website of {job.company} for an e-mail address...")
-    session.find_email_on_website(job, on_captcha=events.captcha, on_captcha_done=events.captcha_done,
-                                  captcha_timeout=settings.captcha_timeout)
-    company_put(job)
-
-
 def run(session: BrowserSession, settings: RunSettings, known: Callable[[str], bool],
-        save: Callable[[Job], None], events: RunEvents,
-        company_get: Callable[[str], dict | None] = lambda name: None,
-        company_put: Callable[[Job], None] = lambda job: None) -> dict:
+        save: Callable[[Job], None], events: RunEvents) -> dict:
     """Search page by page and open each matching job.  Returns a summary."""
     opened = found = skipped = 0
     page_number, last_page = 1, 1
@@ -529,8 +369,6 @@ def run(session: BrowserSession, settings: RunSettings, known: Callable[[str], b
                 session.fetch_detail(job, want_contact=settings.want_contact, on_captcha=events.captcha,
                                      on_captcha_done=events.captcha_done,
                                      captcha_timeout=settings.captcha_timeout)
-                if settings.find_on_website and not job.emails:
-                    lookup_email(session, job, settings, events, company_get, company_put)
             except StopRequested:
                 save(job)
                 raise
@@ -542,33 +380,3 @@ def run(session: BrowserSession, settings: RunSettings, known: Callable[[str], b
         page_number += 1
     return {"opened": opened, "found": found, "skipped": skipped}
 
-
-def fill_missing_emails(session: BrowserSession, jobs: list[Job], settings: RunSettings,
-                        save: Callable[[Job], None], events: RunEvents,
-                        company_get: Callable[[str], dict | None] = lambda name: None,
-                        company_put: Callable[[Job], None] = lambda job: None) -> dict:
-    """For collected jobs without e-mail: look in the saved ad text, then on
-    the company website."""
-    done = found = 0
-    for job in jobs:
-        if job.emails:
-            continue
-        if done >= settings.max_jobs:
-            break
-        done += 1
-        events.status(f"E-mail {done}: {job.company} ({job.ort})")
-        ad_emails = extract_emails(job.description)
-        if ad_emails:
-            job.emails, job.email_source, job.contact_status = ad_emails, "BA-Anzeige (Stellentext)", "ok"
-        else:
-            try:
-                lookup_email(session, job, settings, events, company_get, company_put)
-            except StopRequested:
-                raise
-            except Exception as exc:
-                log.warning("E-mail search failed for %s: %s", job.company, exc)
-        if job.emails:
-            found += 1
-        save(job)
-        events.job(job)
-    return {"opened": done, "found": found, "skipped": 0, "mode": "emails"}
