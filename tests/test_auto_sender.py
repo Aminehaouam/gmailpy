@@ -76,17 +76,25 @@ def test_latest_draft_not_mentioning_company_is_not_sent(sender, backend, folder
     assert backend.sent == [] and backend.method_calls("drafts.update") == []
 
 
-def test_draft_still_being_written_is_not_sent(sender, backend, folder, make_pdf, monkeypatch):
+def test_fresh_draft_is_sent_immediately(sender, backend, folder, make_pdf):
+    """No waiting: a draft saved seconds ago is sent at once."""
+    target = draft(backend, "Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de", age_s=2)
+    make_pdf(TROMPETTER, age=30)
+    result = sender.run_once(folder, dry_run=False)
+    assert result.kind == SENT, result.message
+    assert [s["draft_id"] for s in backend.sent] == [target]
+
+
+def test_optional_settle_time(gmail, db, config, backend, folder, make_pdf):
+    config.data["draft_settle_seconds"] = 60
+    sender = AutoSender(gmail, db, config.data, sleep=lambda _s: None)
     target = draft(backend, "Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de", age_s=5)
     make_pdf(TROMPETTER, age=30)
     result = sender.run_once(folder, dry_run=False)
     assert result.kind == WAITING and "changed" in result.message
-    assert backend.sent == []
-    # A minute later the draft is unchanged -> sent.
     backend.drafts[target]["internal_date"] -= 120_000
     sender._next_try.clear()
-    gmail = sender.gmail
-    gmail._cache.clear()
+    sender.gmail._cache.clear()
     assert sender.run_once(folder, dry_run=False).kind == SENT
 
 
@@ -114,7 +122,7 @@ def test_unfinished_drafts_are_not_sent(sender, backend, folder, make_pdf, subje
 def test_waits_and_retries_until_draft_exists(sender, backend, folder, make_pdf, monkeypatch):
     make_pdf(TROMPETTER, age=30)
     first = sender.run_once(folder, dry_run=False)
-    assert first.kind == WAITING and first.retry_in == 15
+    assert first.kind == WAITING and first.retry_in == 3
     lists = len(backend.method_calls("drafts.list"))
     assert sender.run_once(folder, dry_run=False).kind == WAITING   # not due: no Gmail call
     assert len(backend.method_calls("drafts.list")) == lists
@@ -143,7 +151,7 @@ def test_unreadable_filename_waits(sender, backend, folder, make_pdf):
 
 def test_file_still_being_saved_waits(sender, backend, folder, make_pdf):
     draft(backend, "Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de")
-    make_pdf(TROMPETTER, age=0.2)
+    make_pdf(TROMPETTER, age=0.1)
     assert sender.run_once(folder, dry_run=False).kind == WAITING
     assert backend.sent == []
 
@@ -190,3 +198,21 @@ def test_success_chime_is_valid_wav():
     with wave.open(io.BytesIO(success_chime_wav())) as wav:
         assert wav.getnchannels() == 1 and wav.getsampwidth() == 2
         assert 0.4 < wav.getnframes() / wav.getframerate() < 1.0
+
+
+def test_old_config_gets_new_fast_timings(paths):
+    import json
+    from config import Config
+    paths.config_file.write_text(json.dumps({
+        "dry_run": False, "auto_send": True, "draft_settle_seconds": 60.0,
+        "auto_retry_seconds": 15.0, "watch_interval_seconds": 3.0,
+        "scanner": {"min_file_age_seconds": 3.0, "stability_check_seconds": 1.0},
+    }), encoding="utf-8")
+    cfg = Config.load(paths)
+    assert cfg.data["draft_settle_seconds"] == 0.0
+    assert cfg.data["auto_retry_seconds"] == 3.0
+    assert cfg.watch_interval_ms == 2000
+    assert cfg.scanner["min_file_age_seconds"] == 1.0
+    assert cfg.auto_send is True and cfg.dry_run is False      # user choices are kept
+    cfg.save()
+    assert Config.load(paths).data["config_version"] == 2

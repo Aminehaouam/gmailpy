@@ -13,10 +13,10 @@ Every few seconds AutoSender.run_once():
      * otherwise your LATEST draft, if it mentions the company anywhere
        (subject, recipient or text)                  -> the latest draft
      * otherwise                                     -> wait and look again;
-5. checks the draft is finished: it has a recipient, a subject, some text,
-   and was not changed for `draft_settle_seconds` (so a draft you are still
-   typing - Gmail saves it every few seconds - is never sent half-written);
-6. attaches the PDF (same safe procedure as the manual mode, including the
+5. checks the draft has a recipient, a subject and some text (instant
+   checks; optionally also `draft_settle_seconds` without changes, default 0
+   = no waiting);
+6. immediately attaches the PDF (same safe procedure as the manual mode, including the
    byte-by-byte preservation check) and SENDS the e-mail.
 
 Nothing here ever opens a dialog; run_once returns an AutoResult that the
@@ -90,7 +90,7 @@ class AutoSender:
         self.clock = clock
         scanner_settings = dict(settings["scanner"])
         scanner_settings["stability_check_seconds"] = min(
-            0.5, float(scanner_settings.get("stability_check_seconds", 1.0)))
+            0.3, float(scanner_settings.get("stability_check_seconds", 0.3)))
         self.scanner = FileScanner(db, scanner_settings, clock=clock, sleep=sleep)
         self.parser = FilenameParser(settings["filename_parser"])
         self.engine = MatchingEngine(settings["matching"].get("generic_email_domains", []))
@@ -102,11 +102,11 @@ class AutoSender:
     # -- settings -----------------------------------------------------------
     @property
     def retry_seconds(self) -> float:
-        return max(5.0, float(self.settings.get("auto_retry_seconds", 15.0)))
+        return max(1.0, float(self.settings.get("auto_retry_seconds", 3.0)))
 
     @property
     def settle_seconds(self) -> float:
-        return max(0.0, float(self.settings.get("draft_settle_seconds", 60.0)))
+        return max(0.0, float(self.settings.get("draft_settle_seconds", 0.0)))
 
     @property
     def recent_count(self) -> int:

@@ -317,7 +317,7 @@ Set this once in the main window (the settings are saved):
 * tick **Send e-mail automatically after attaching**,
 * untick **Dry-run mode**.
 
-From then on the app works on its own, every **3 seconds**:
+From then on the app works on its own, every **2 seconds**:
 
 1. It looks at the **latest PDF** in the Bewerbungen folder (newest saved,
    created or copied file – only that one).
@@ -330,15 +330,17 @@ From then on the app works on its own, every **3 seconds**:
    **success chime**. The banner shows "Last sent: ...".
 
 It never opens a dialog in this mode. If something does not fit yet, the
-banner says why and the app simply looks again (every 15 seconds), for
+banner says why and the app simply looks again (every 3 seconds), for
 example:
 
 * "no recent draft mentions 'Trompetter' yet" – write the draft; it is sent
   as soon as it exists,
-* "the draft was changed 12 s ago" – a draft is only sent when it has a
-  recipient, a subject and some text and was **not changed for 1 minute**,
-  so a draft you are still typing (Gmail saves it every few seconds) is
-  never sent half-written,
+* "the draft has no recipient yet" – a draft is only sent when it has a
+  recipient, a subject and some text. As soon as a fitting draft exists it is
+  sent **immediately** (no waiting time). Careful: Gmail saves drafts while
+  you type, so a draft you are still typing could be sent as soon as it has
+  recipient, subject and text – write the draft first, then save the PDF, or
+  set `draft_settle_seconds` (e.g. 60) in `config.json` to require a pause,
 * "company not readable from the file name" – rename the file.
 
 A PDF that was sent is never sent again (also not after renaming). If

@@ -1127,8 +1127,7 @@ class App(tk.Tk):
                 "the draft for that company (your latest draft, if it mentions the company) and "
                 "SENDS the e-mail with the PDF attached - no dialog, no click. A chime plays when "
                 "it was sent.\n\n"
-                "A draft is only sent when it has a recipient, a subject and text and was not "
-                "changed for 1 minute (so a draft you are still writing is never sent). A sent "
+                "A draft is only sent when it has a recipient, a subject and text. A sent "
                 "e-mail cannot be recalled. While dry-run mode is on, nothing is sent.", title="Automatic sending", warning=True):
             self.auto_send_var.set(False)
         self.config_obj.auto_send = bool(self.auto_send_var.get())

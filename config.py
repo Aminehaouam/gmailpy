@@ -176,7 +176,12 @@ DEFAULT_GENERIC_EMAIL_DOMAINS = [
     "zoho.com", "yandex.com", "mail.com", "kabelmail.de", "vodafone.de",
 ]
 
+# Bumped when default timings change; older config.json files get the new
+# timing defaults (see Config.load).
+CONFIG_VERSION = 2
+
 DEFAULTS: dict[str, Any] = {
+    "config_version": CONFIG_VERSION,
     # Folder that is scanned for application PDFs ("" = <Desktop>\Bewerbungen).
     "watch_folder": "",
     # Dry-run mode: preview everything, never modify Gmail.  On by default so
@@ -185,15 +190,15 @@ DEFAULTS: dict[str, Any] = {
     # Automatic mode: watch the folder (every watch_interval_seconds while
     # Gmail is connected) and react to the latest PDF without clicking Scan.
     "auto_check": True,
-    "watch_interval_seconds": 3.0,
+    "watch_interval_seconds": 2.0,
     # Fully automatic: attach AND send when the latest PDF fits a draft (see
     # auto_sender.py).  Also makes confirmed manual attachments send.
     "auto_send": False,
-    # How long a draft must stay unchanged before it is sent automatically
-    # (Gmail saves drafts every few seconds while you type).
-    "draft_settle_seconds": 60.0,
+    # Optional: seconds a draft must stay unchanged before it is sent
+    # automatically.  0 = send immediately when a match is found.
+    "draft_settle_seconds": 0.0,
     # Look again after this many seconds when the draft is not ready yet.
-    "auto_retry_seconds": 15.0,
+    "auto_retry_seconds": 3.0,
     # Number of most recent drafts that are checked in automatic mode.
     "auto_recent_drafts": 15,
     # Play a chime when an e-mail was sent.
@@ -201,9 +206,9 @@ DEFAULTS: dict[str, Any] = {
     "scanner": {
         # Files modified more recently than this are treated as "still being
         # written" and skipped.
-        "min_file_age_seconds": 3.0,
+        "min_file_age_seconds": 1.0,
         # Size/mtime are sampled twice with this delay to detect ongoing writes.
-        "stability_check_seconds": 1.0,
+        "stability_check_seconds": 0.3,
         # Require the PDF to start with %PDF- and end with %%EOF (detects
         # truncated/incomplete copies and downloads).
         "require_complete_pdf": True,
@@ -302,6 +307,18 @@ class Config:
                     log.warning("config.json does not contain an object - using defaults")
             except (OSError, ValueError) as exc:
                 log.warning("Could not read config.json (%s) - using defaults", exc)
+        version = overrides.get("config_version", 1)
+        if not isinstance(version, int) or version < CONFIG_VERSION:
+            # Version 2 made automatic sending immediate: drop the old, slower
+            # timing values so the new defaults apply.
+            for key in ("draft_settle_seconds", "auto_retry_seconds", "watch_interval_seconds",
+                        "auto_check_interval_seconds", "auto_watch_since", "auto_retry_minutes"):
+                overrides.pop(key, None)
+            scanner = overrides.get("scanner")
+            if isinstance(scanner, dict):
+                scanner.pop("min_file_age_seconds", None)
+                scanner.pop("stability_check_seconds", None)
+            overrides["config_version"] = CONFIG_VERSION
         return cls(paths, _deep_merge(DEFAULTS, overrides))
 
     def save(self) -> None:
@@ -347,7 +364,7 @@ class Config:
 
     @property
     def watch_interval_ms(self) -> int:
-        return int(max(1.0, float(self.data.get("watch_interval_seconds", 3.0))) * 1000)
+        return int(max(1.0, float(self.data.get("watch_interval_seconds", 2.0))) * 1000)
 
     @property
     def scanner(self) -> dict[str, Any]:
