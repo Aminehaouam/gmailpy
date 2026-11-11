@@ -285,3 +285,126 @@ def test_window_shows_results_and_captcha_alert(tmp_path, monkeypatch):
         app.on_close()
         del app
         gc.collect()
+
+
+# -- e-mail search ----------------------------------------------------------
+
+from ba_browser import fill_missing_emails  # noqa: E402
+from email_finder import (  # noqa: E402
+    candidate_links,
+    company_tokens,
+    decode_result_link,
+    extract_emails,
+    looks_like_company_site,
+    rank_emails,
+    urls_in_text,
+)
+
+
+def test_extract_emails_plain_obfuscated_and_mailto():
+    text = ("Bewerbung bitte an Bewerbung@Firma-GmbH.de oder info [at] firma-gmbh [dot] de, "
+            "karriere(at)firma.de. Datenschutz: datenschutz@firma-gmbh.de, Vertrieb: zentralvertrieb@firma.de, "
+            "logo@2x.png, noreply@firma.de, kontakt@arbeitsagentur.de")
+    assert extract_emails(text) == ["bewerbung@firma-gmbh.de", "info@firma-gmbh.de", "karriere@firma.de"]
+    assert extract_emails("", '<a href="mailto:ausbildung%40stadtwerke-bochum.de">x</a> jobs&#64;x-y.de') == \
+        ["ausbildung@stadtwerke-bochum.de", "jobs@x-y.de"]
+
+
+def test_rank_prefers_application_addresses_on_company_domain():
+    emails = ["info@firma.de", "max.mustermann@firma.de", "ausbildung@firma.de", "bewerbung@other.de"]
+    assert rank_emails(emails, "https://www.firma.de")[:2] == ["ausbildung@firma.de", "info@firma.de"]
+
+
+def test_company_site_check():
+    assert company_tokens("Barth & Kerner GmbH") == ["barth", "kerner"]
+    assert looks_like_company_site("https://deutsche-steinzeug.de/de", "Deutsche Steinzeug Solar Ceramics GmbH")
+    assert not looks_like_company_site("https://www.db.com/", "Deutsche Steinzeug Solar Ceramics GmbH")
+    assert not looks_like_company_site("https://de.indeed.com/cmp/barth", "Barth und Kerner GmbH")
+    assert looks_like_company_site("https://www.barth-kerner.de", "Barth und Kerner GmbH")
+    assert looks_like_company_site("https://www.example-energie.de", "Ostwind GmbH", "Ostwind GmbH – Startseite")
+
+
+def test_search_result_links_are_decoded():
+    assert decode_result_link("https://www.bing.com/ck/a?!&&p=x&u=a1aHR0cHM6Ly93d3cuZGIuY29tLw&ntb=1") == \
+        "https://www.db.com/"
+    assert decode_result_link("https://www.google.com/url?q=https://firma.de/&sa=U") == "https://firma.de/"
+    assert decode_result_link("https://firma.de/x") == "https://firma.de/x"
+
+
+def test_search_queries():
+    from email_finder import search_queries
+    assert search_queries("YNCORIS", "Hürth, Rheinland") == ["YNCORIS Hürth", "YNCORIS"]
+    assert search_queries("Krüger GmbH & Co. KG", "") == ["Krüger GmbH & Co. KG"]
+
+
+def test_website_pages_worth_visiting():
+    links = [("Karriere", "/karriere"), ("Ausbildung", "/karriere/ausbildung"), ("Produkte", "/produkte"),
+             ("Kontakt", "/kontakt"), ("Impressum", "/impressum"), ("Facebook", "https://facebook.com/x"),
+             ("Datenblatt", "/x.pdf")]
+    assert candidate_links(links, "https://www.firma.de/") == [
+        "https://www.firma.de/karriere", "https://www.firma.de/karriere/ausbildung",
+        "https://www.firma.de/kontakt", "https://www.firma.de/impressum"]
+    assert urls_in_text("Mehr unter www.firma.de/karriere. Oder https://jobs.firma.de!") == \
+        ["https://www.firma.de/karriere", "https://jobs.firma.de"]
+
+
+def test_email_in_ad_text_is_found():
+    """Real ad: the application address is written in the job text."""
+    job = Job("10000-1208628753-S", "", "Elektroniker/in - Betriebstechnik", "Betriebstechnik", "")
+    apply_detail(job, page("detail.html"))
+    assert job.emails == ["bewerbung.witterschlick@deutsche-steinzeug.de"]
+    assert job.email_source == "BA-Anzeige (Stellentext)"
+
+
+def test_company_cache(tmp_path):
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    assert store.company_get("Firma GmbH") is None
+    job = Job("R1", "t", "Elektroniker/in", "", "Firma  GmbH", emails=["ausbildung@firma.de"],
+              website="https://firma.de", email_source="Firmenwebsite (firma.de)")
+    store.company_put(job)
+    assert store.company_get("firma gmbh")["emails"] == ["ausbildung@firma.de"]
+    store.company_put(Job("R2", "t", "Elektroniker/in", "", "Nichts AG"))
+    assert store.company_get("Nichts AG") == {"website": "", "emails": [], "source": ""}
+
+
+class WebFakeSession(FakeSession):
+    def __init__(self, pages, websites):
+        super().__init__(pages)
+        self.websites = websites
+        self.web_lookups = []
+
+    def fetch_detail(self, job, *, want_contact, on_captcha, on_captcha_done, captcha_timeout):
+        self.opened.append(job.refnr)
+        job.contact_status = "none"
+        return job
+
+    def find_email_on_website(self, job, *, on_captcha, on_captcha_done, captcha_timeout):
+        self.web_lookups.append(job.company)
+        if job.company in self.websites:
+            job.website, job.emails = self.websites[job.company]
+            job.email_source, job.contact_status = "Firmenwebsite (x)", "ok"
+        return job
+
+
+def test_run_looks_up_email_on_website_once_per_company(tmp_path):
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    pg = make_page(["Betriebstechnik", "Betriebstechnik", "Betriebstechnik"], 1, last=1)
+    pg.jobs[1].company = pg.jobs[0].company          # two ads of the same company
+    session = WebFakeSession([pg], {"Firma 0": ("https://firma0.de", ["ausbildung@firma0.de"])})
+    run(session, RunSettings(specialties=ALL), known=lambda r: False, save=store.save, events=RunEvents(),
+        company_get=store.company_get, company_put=store.company_put)
+    assert session.web_lookups == ["Firma 0", "Firma 2"]   # cached for the second ad
+    emails = {job.refnr: job.emails for job, _ in store.all()}
+    assert emails == {"P1-0": ["ausbildung@firma0.de"], "P1-1": ["ausbildung@firma0.de"], "P1-2": []}
+
+
+def test_fill_missing_emails_uses_ad_text_first(tmp_path):
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    with_text = Job("A", "t", "Elektroniker/in", "", "Text GmbH", description="Mail: jobs@text-gmbh.de")
+    on_web = Job("B", "t", "Elektroniker/in", "", "Web GmbH")
+    done = Job("C", "t", "Elektroniker/in", "", "Fertig GmbH", emails=["x@fertig.de"])
+    session = WebFakeSession([], {"Web GmbH": ("https://web.de", ["bewerbung@web.de"])})
+    summary = fill_missing_emails(session, [with_text, on_web, done], RunSettings(), save=store.save,
+                                  events=RunEvents(), company_get=store.company_get, company_put=store.company_put)
+    assert summary["found"] == 2 and session.web_lookups == ["Web GmbH"]
+    assert with_text.emails == ["jobs@text-gmbh.de"] and on_web.emails == ["bewerbung@web.de"]

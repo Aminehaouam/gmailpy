@@ -27,7 +27,26 @@ your browser, and tells you when the site asks for a **Sicherheitsabfrage**
    You type the characters and click *Absenden*; the app notices and
    continues automatically. You can also skip that job's contact details.
    The captcha is never solved automatically.
-6. Everything is saved; the next run skips jobs already collected (jobs whose
+6. **Finding the e-mail address**, in this order:
+   * the BA ad itself – job text, employer info and every e-mail link on the
+     page (many ads write "Bewerbung an bewerbung@firma.de" in the text);
+   * the contact box behind the Sicherheitsabfrage (skipped automatically
+     when the ad already contains an e-mail address – fewer captchas);
+   * the **company website**: the homepage linked in the BA ad, a web
+     address in the job text, or a **Google search** for company + place
+     (Bing as fallback). A search result is only used if the company name
+     appears in its web address or page title, so job portals and unrelated
+     sites are never taken. On the website the app reads the start page,
+     the Karriere/Ausbildung/Bewerbung, Kontakt and Impressum pages.
+     Application addresses (bewerbung@, ausbildung@, karriere@, personal@,
+     recruiting@ …) come first, then info@/kontakt@; datenschutz@, noreply@,
+     vertrieb@ and similar are ignored. If Google asks "Ich bin kein
+     Roboter", you get the same alert as for the Sicherheitsabfrage (or let
+     the app continue with Bing).
+   Each company is searched once (the result is remembered; "nothing found"
+   is tried again after 7 days). **Fehlende E-Mails suchen** fills in
+   addresses for jobs collected earlier.
+7. Everything is saved; the next run skips jobs already collected (jobs whose
    contact details are still missing are opened again). **Als Excel/CSV
    speichern** exports the list.
 

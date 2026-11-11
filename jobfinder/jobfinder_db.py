@@ -24,7 +24,8 @@ CSV_COLUMNS = [
     ("first_seen", "Gefunden am"), ("specialty", "Fachrichtung"), ("company", "Firma"),
     ("street", "Straße"), ("plz", "PLZ"), ("ort", "Ort"), ("start", "Beginn"),
     ("contact_person", "Ansprechpartner"), ("emails", "E-Mail"), ("phones", "Telefon"),
-    ("homepage", "Homepage"), ("external_url", "Bewerbung über Partnerseite"),
+    ("email_source", "E-Mail gefunden in"), ("website", "Firmenwebsite"),
+    ("homepage", "Homepage (BA)"), ("external_url", "Bewerbung über Partnerseite"),
     ("title", "Stellentitel"), ("education", "Schulabschluss"), ("url", "Link zur Stelle"),
     ("refnr", "Referenznummer"),
 ]
@@ -39,6 +40,10 @@ class JobStore:
             conn.execute("""CREATE TABLE IF NOT EXISTS jobs (
                 refnr TEXT PRIMARY KEY, data TEXT NOT NULL,
                 first_seen TEXT NOT NULL, updated TEXT NOT NULL)""")
+            # E-mail search results per company (also "nothing found", so the
+            # same company is not searched again and again).
+            conn.execute("""CREATE TABLE IF NOT EXISTS companies (
+                name TEXT PRIMARY KEY, website TEXT, emails TEXT, source TEXT, updated TEXT NOT NULL)""")
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path, timeout=15)
@@ -60,6 +65,32 @@ class JobStore:
                 """INSERT INTO jobs (refnr, data, first_seen, updated) VALUES (?, ?, ?, ?)
                    ON CONFLICT(refnr) DO UPDATE SET data = excluded.data, updated = excluded.updated""",
                 (job.refnr, data, now, now))
+
+    @staticmethod
+    def _company_key(name: str) -> str:
+        return " ".join((name or "").casefold().split())
+
+    def company_get(self, name: str) -> dict | None:
+        """Cached e-mail search result; 'nothing found' results expire after 7 days."""
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT website, emails, source, updated FROM companies WHERE name = ?",
+                               (self._company_key(name),)).fetchone()
+        if row is None:
+            return None
+        emails = json.loads(row[1] or "[]")
+        if not emails and (datetime.now() - datetime.fromisoformat(row[3])).days >= 7:
+            return None
+        return {"website": row[0] or "", "emails": emails, "source": row[2] or ""}
+
+    def company_put(self, job: Job) -> None:
+        now = datetime.now().isoformat(timespec="seconds")
+        emails = job.emails if job.email_source.startswith("Firmenwebsite") else []
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """INSERT INTO companies (name, website, emails, source, updated) VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(name) DO UPDATE SET website = excluded.website, emails = excluded.emails,
+                   source = excluded.source, updated = excluded.updated""",
+                (self._company_key(job.company), job.website, json.dumps(emails), job.email_source, now))
 
     def all(self) -> list[tuple[Job, str]]:
         """All jobs, newest first, with the date they were first found."""

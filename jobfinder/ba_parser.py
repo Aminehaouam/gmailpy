@@ -122,6 +122,8 @@ class Job:
     homepage: str = ""
     company_size: str = ""
     external_url: str = ""     # job from a partner portal: apply there
+    website: str = ""          # company website used to find the e-mail
+    email_source: str = ""     # where the e-mail address was found
     emails: list[str] = field(default_factory=list)
     phones: list[str] = field(default_factory=list)
     contact_person: str = ""
@@ -209,6 +211,16 @@ def apply_detail(job: Job, state: dict[str, Any]) -> Job:
     job.homepage = homepage or (links[0].get("url") if links else "") or ""
     job.company_size = str(employer.get("betriebsgroesse") or "")
     job.external_url = detail.get("externeURL") or ""
+    # E-mail addresses written in the ad itself (job text, employer info).
+    from email_finder import extract_emails  # local import: keeps the parser module standalone
+    ad_text = "\n".join(str(x) for x in (detail.get("stellenangebotsBeschreibung"), employer.get("beschreibung"),
+                                         employer.get("kontaktinformationen")) if x)
+    ad_emails = extract_emails(ad_text)
+    if ad_emails and not job.emails:
+        job.emails = ad_emails
+        job.email_source = "BA-Anzeige (Stellentext)"
+    if not job.phones:
+        job.phones = parse_contact_text(detail.get("stellenangebotsBeschreibung") or "")["phones"][:2]
     job.company = detail.get("firma") or job.company
     return job
 
