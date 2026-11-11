@@ -13,6 +13,12 @@ attachment to an existing draft after you confirm it.
 
 ![Main window](docs/screenshots/single.png)
 
+> **Also in this repository:** the separate **Ausbildung Job Finder**
+> (`jobfinder/`), which collects Elektroniker/in apprenticeships (all
+> specialties) from the Jobsuche der Bundesagentur für Arbeit with your
+> browser and alerts you when a Sicherheitsabfrage needs solving. See
+> [jobfinder/README.md](jobfinder/README.md).
+
 ---
 
 ## Contents
