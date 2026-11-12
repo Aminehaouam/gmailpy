@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 from alert_sound import play_attention, play_done
 from ba_browser import BrowserNotAvailable, BrowserSession, RunEvents, RunSettings, StopRequested, run
-from ba_parser import KNOWN_SPECIALTIES, OTHER_SPECIALTY, Job
+from ba_parser import KNOWN_SPECIALTIES, OTHER_SPECIALTY, Job, parse_links
 from jobfinder_db import JobStore
 
 log = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ RADIUS_CHOICES = ["ganz Deutschland", "10 km", "25 km", "50 km", "100 km", "200 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "wo": "", "umkreis": "50 km", "max_jobs": 30, "want_contact": True, "skip_known": True,
-    "specialties": KNOWN_SPECIALTIES + [OTHER_SPECIALTY],
+    "specialties": KNOWN_SPECIALTIES + [OTHER_SPECIALTY], "links": "", "filter_elektroniker": True,
 }
 
 
@@ -270,6 +270,28 @@ class JobFinderApp(tk.Tk):
         ttk.Button(links, text="Keine", command=lambda: self._set_specs(False)).pack(side="left", padx=(6, 0))
         ttk.Label(links, style="Card.TLabel", foreground=C["muted"],
                   text="  Nicht enthalten: IT-System-Elektroniker/in, Industrieelektriker/in u. ä.").pack(side="left")
+        self.filter_var = tk.BooleanVar(value=bool(self.settings["filter_elektroniker"]))
+        ttk.Checkbutton(spec, text="Nur Elektroniker/in der gewählten Fachrichtungen übernehmen",
+                        variable=self.filter_var, style="Card.TCheckbutton").grid(
+            row=6, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+        # The user's own Jobsuche links
+        ttk.Label(spec, style="Card.TLabel", wraplength=760, justify="left", text=(
+            "Eigene Links aus der Jobsuche (optional, einer pro Zeile) – z. B. die Suche nach einer "
+            "Fachrichtung oder einzelne Stellen. Mit Links werden Ort/Umkreis links nicht verwendet:")).grid(
+            row=7, column=0, columnspan=3, sticky="w", pady=(10, 2))
+        link_frame = ttk.Frame(spec, style="Card.TFrame")
+        link_frame.grid(row=8, column=0, columnspan=3, sticky="ew")
+        link_frame.columnconfigure(0, weight=1)
+        self.links_text = tk.Text(link_frame, height=3, width=40, wrap="none", relief="solid", borderwidth=1,
+                                  background="#ffffff", font=("", 9))
+        self.links_text.grid(row=0, column=0, sticky="nsew")
+        self.links_text.insert("1.0", self.settings.get("links", ""))
+        link_buttons = ttk.Frame(link_frame, style="Card.TFrame")
+        link_buttons.grid(row=0, column=1, sticky="n", padx=(6, 0))
+        ttk.Button(link_buttons, text="Einfügen", command=self._paste_link).pack(fill="x")
+        ttk.Button(link_buttons, text="Leeren",
+                   command=lambda: self.links_text.delete("1.0", "end")).pack(fill="x", pady=(4, 0))
 
         # Results
         results = ttk.Labelframe(body, text="Gefundene Stellen", style="Card.TLabelframe")
@@ -304,6 +326,15 @@ class JobFinderApp(tk.Tk):
                                padx=10, pady=8)
         self.details.grid(row=1, column=2, sticky="nsew", padx=(10, 0))
         self.details.configure(state="disabled")
+
+    def _paste_link(self) -> None:
+        try:
+            text = self.clipboard_get().strip()
+        except tk.TclError:
+            return
+        if text:
+            current = self.links_text.get("1.0", "end").strip()
+            self.links_text.insert("end", ("\n" if current else "") + text)
 
     def _set_specs(self, value: bool) -> None:
         for var in self.spec_vars.values():
@@ -382,16 +413,20 @@ class JobFinderApp(tk.Tk):
     def current_settings(self) -> RunSettings:
         radius = self.radius_var.get()
         umkreis = None if radius.startswith("ganz") else int(radius.split()[0])
+        searches, jobs, _errors = parse_links(self.links_text.get("1.0", "end"))
         return RunSettings(
             wo=self.wo_var.get().strip(), umkreis=umkreis if self.wo_var.get().strip() else None,
             specialties={name for name, var in self.spec_vars.items() if var.get()},
             max_jobs=max(1, int(self.max_var.get() or 30)), want_contact=bool(self.contact_var.get()),
-            skip_known=bool(self.skip_var.get()))
+            skip_known=bool(self.skip_var.get()), search_urls=searches, job_refs=jobs,
+            filter_elektroniker=bool(self.filter_var.get()))
 
     def _save_settings(self, settings: RunSettings) -> None:
         data = {"wo": settings.wo, "umkreis": self.radius_var.get(), "max_jobs": settings.max_jobs,
                 "want_contact": settings.want_contact, "skip_known": settings.skip_known,
-                "specialties": sorted(settings.specialties)}
+                "specialties": sorted(settings.specialties),
+                "links": self.links_text.get("1.0", "end").strip(),
+                "filter_elektroniker": settings.filter_elektroniker}
         try:
             self.settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError:
@@ -400,8 +435,14 @@ class JobFinderApp(tk.Tk):
     def start(self) -> None:
         if self.worker and self.worker.is_alive():
             return
+        _searches, _jobs, errors = parse_links(self.links_text.get("1.0", "end"))
+        if errors:
+            messagebox.showwarning(APP_NAME, "Diese Zeilen sind keine Links der Jobsuche und werden "
+                                   "nicht verwendet:\n\n" + "\n".join(errors[:8]), parent=self)
+            if not (_searches or _jobs) and self.links_text.get("1.0", "end").strip():
+                return
         settings = self.current_settings()
-        if not settings.specialties:
+        if settings.filter_elektroniker and not settings.specialties:
             messagebox.showinfo(APP_NAME, "Bitte mindestens eine Fachrichtung auswählen.", parent=self)
             return
         self._save_settings(settings)

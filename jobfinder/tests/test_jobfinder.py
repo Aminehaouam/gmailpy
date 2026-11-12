@@ -152,6 +152,11 @@ class FakeSession:
     def search(self, was, wo, umkreis, page_number):
         return self.pages[page_number - 1]
 
+    def search_url(self, url, page_number, only_elektroniker=True):
+        pages = self.pages.get(url, []) if isinstance(self.pages, dict) else self.pages
+        self.searched = getattr(self, "searched", []) + [(url, page_number)]
+        return pages[page_number - 1]
+
     def fetch_detail(self, job, *, want_contact, on_captcha, on_captcha_done, captcha_timeout):
         if self.stop_after is not None and len(self.opened) >= self.stop_after:
             raise StopRequested()
@@ -405,3 +410,62 @@ def test_job_summary_lists_contact_first():
     assert text.index("Ansprechpartner: Frau Dr. Maria Müller – Ausbildungsleitung") < text.index("STELLE")
     assert "Firmenwebsite: http://www.azubi-bei-ford.de" in text
     assert "Ausbildungsvergütung: 1. Jahr 1.261 €" in text
+
+
+# -- the user's own links -----------------------------------------------------
+
+from ba_parser import LinkError, classify_link, parse_links, with_page  # noqa: E402
+
+GEB = ("https://www.arbeitsagentur.de/jobsuche/suche?suchbereich=ausbildung&"
+       "was=Elektroniker%2Fin%20-%20Energie-%20und%20Geb%C3%A4udetechnik&wo=Bonn&umkreis=50&angebotsart=4")
+
+
+def test_classify_links():
+    kind, url = classify_link(GEB + "&page=3")
+    assert kind == "search" and "page=" not in url and "umkreis=50" in url and "angebotsart=4" in url
+    assert classify_link("www.arbeitsagentur.de/jobsuche/jobdetail/10000-1208539150-S?x=1") == \
+        ("job", "10000-1208539150-S")
+    assert classify_link("  10001-1003940968-S ") == ("job", "10001-1003940968-S")
+    for bad in ("https://www.google.com/search?q=x", "https://www.arbeitsagentur.de/bildung", "hallo"):
+        with pytest.raises(LinkError):
+            classify_link(bad)
+
+
+def test_parse_links_and_paging():
+    searches, jobs, errors = parse_links(f"{GEB}\n\n{GEB}&page=2\n10001-1003940968-S\nkein link\n")
+    assert len(searches) == 1 and jobs == ["10001-1003940968-S"] and len(errors) == 1
+    paged = with_page(searches[0], 4)
+    assert paged.endswith("&page=4") and "wo=Bonn" in paged
+    assert "page=" not in with_page(paged, 1)
+
+
+def test_filter_off_keeps_every_job_of_the_link():
+    assert len(parse_search(page("search_koeln_25km.html"), only_elektroniker=False).jobs) == 25
+    assert len(parse_search(page("search_koeln_25km.html")).jobs) == 22
+
+
+def test_run_with_own_links():
+    a = make_page(["Energie- und Gebäudetechnik"] * 2, 1, last=1)
+    b = make_page(["Energie- und Gebäudetechnik", "Betriebstechnik"], 1, last=1)
+    b.jobs[1].refnr = "B-1"
+    b.jobs[0].refnr = a.jobs[1].refnr                     # same job in both searches
+    session = FakeSession({"https://x/suche?a=1": [a], "https://x/suche?b=1": [b]})
+    settings = RunSettings(specialties=ALL, search_urls=["https://x/suche?a=1", "https://x/suche?b=1"],
+                           job_refs=["9999-1-S"])
+    summary = run(session, settings, known=lambda r: False, save=lambda j: None, events=RunEvents())
+    assert session.opened == ["9999-1-S", "P1-0", "P1-1", "B-1"]   # the duplicate is opened once
+    assert summary["opened"] == 4
+    assert [u for u, _ in session.searched] == ["https://x/suche?a=1", "https://x/suche?b=1"]
+
+
+def test_run_specialty_filter_can_be_switched_off():
+    pg = make_page(["Betriebstechnik", "Geräte und Systeme"], 1, last=1)
+    pg.jobs[1].specialty = ""
+    pg.jobs[1].beruf = "Mechatroniker/in"
+    on = FakeSession({"u": [pg]})
+    run(on, RunSettings(specialties={"Betriebstechnik"}, search_urls=["u"]), known=lambda r: False,
+        save=lambda j: None, events=RunEvents())
+    off = FakeSession({"u": [pg]})
+    run(off, RunSettings(specialties={"Betriebstechnik"}, search_urls=["u"], filter_elektroniker=False),
+        known=lambda r: False, save=lambda j: None, events=RunEvents())
+    assert on.opened == ["P1-0"] and off.opened == ["P1-0", "P1-1"]

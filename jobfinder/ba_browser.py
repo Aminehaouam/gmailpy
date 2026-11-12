@@ -30,6 +30,7 @@ from ba_parser import (
     apply_detail,
     apply_kontaktdaten,
     build_search_url,
+    with_page,
     extract_state,
     find_kontaktdaten,
     parse_contact_text,
@@ -210,6 +211,11 @@ class BrowserSession:
         html = self.goto(build_search_url(was, wo, umkreis, page_number))
         return parse_search(extract_state(html))
 
+    def search_url(self, url: str, page_number: int, only_elektroniker: bool = True) -> SearchPage:
+        """Result page *page_number* of any Jobsuche search link (filters kept)."""
+        html = self.goto(with_page(url, page_number))
+        return parse_search(extract_state(html), only_elektroniker=only_elektroniker)
+
     def contact_state(self) -> dict:
         return self.page.evaluate(_CONTACT_STATE_JS)
 
@@ -331,6 +337,12 @@ class RunSettings:
     want_contact: bool = True
     skip_known: bool = True
     captcha_timeout: float = 600.0
+    # The user's own links: search pages (used instead of was/wo/umkreis)
+    # and single jobs (reference numbers).
+    search_urls: list[str] = field(default_factory=list)
+    job_refs: list[str] = field(default_factory=list)
+    # Keep only Elektroniker/in in the selected specialties.
+    filter_elektroniker: bool = True
 
 
 @dataclass
@@ -344,39 +356,66 @@ class RunEvents:
 
 def run(session: BrowserSession, settings: RunSettings, known: Callable[[str], bool],
         save: Callable[[Job], None], events: RunEvents) -> dict:
-    """Search page by page and open each matching job.  Returns a summary."""
-    opened = found = skipped = 0
-    page_number, last_page = 1, 1
-    while page_number <= min(last_page, settings.max_pages) and opened < settings.max_jobs:
-        events.status(f"Reading search results page {page_number}...")
-        result = session.search(settings.was, settings.wo, settings.umkreis, page_number)
-        if page_number == 1:
-            events.specialties(result.specialties)
-            events.status(f"{result.max_results} results on the site; filtering Elektroniker specialties...")
-        last_page = result.last_page
-        for job in result.jobs:
-            if not specialty_selected(job.specialty, settings.specialties):
-                continue
-            found += 1
-            if settings.skip_known and known(job.refnr):
-                skipped += 1
-                continue
-            if opened >= settings.max_jobs:
-                break
-            opened += 1
-            events.status(f"Opening job {opened}/{settings.max_jobs}: {job.company} ({job.ort})")
-            try:
-                session.fetch_detail(job, want_contact=settings.want_contact, on_captcha=events.captcha,
-                                     on_captcha_done=events.captcha_done,
-                                     captcha_timeout=settings.captcha_timeout)
-            except StopRequested:
-                save(job)
-                raise
-            except Exception as exc:  # one broken page must not stop the run
-                log.warning("Could not read job %s: %s", job.refnr, exc)
-                job.contact_status = job.contact_status or "error"
-            save(job)
-            events.job(job)
-        page_number += 1
-    return {"opened": opened, "found": found, "skipped": skipped}
+    """Open the jobs of the user's job links, then go through the search
+    results (the user's search links, or the search built from place and
+    radius) page by page.  Returns a summary."""
+    counter = {"opened": 0, "found": 0, "skipped": 0}
+    seen: set[str] = set()
 
+    def process(job: Job, filtered: bool) -> bool:
+        """Open one job; returns False when the job limit is reached."""
+        if job.refnr in seen:
+            return True
+        seen.add(job.refnr)
+        if filtered and settings.filter_elektroniker and not specialty_selected(job.specialty, settings.specialties):
+            return True
+        counter["found"] += 1
+        if settings.skip_known and known(job.refnr):
+            counter["skipped"] += 1
+            return True
+        if counter["opened"] >= settings.max_jobs:
+            return False
+        counter["opened"] += 1
+        events.status(f"Opening job {counter['opened']}/{settings.max_jobs}: "
+                      f"{job.company or job.refnr} {f'({job.ort})' if job.ort else ''}".strip())
+        try:
+            session.fetch_detail(job, want_contact=settings.want_contact, on_captcha=events.captcha,
+                                 on_captcha_done=events.captcha_done, captcha_timeout=settings.captcha_timeout)
+        except StopRequested:
+            save(job)
+            raise
+        except Exception as exc:  # one broken page must not stop the run
+            log.warning("Could not read job %s: %s", job.refnr, exc)
+            job.contact_status = job.contact_status or "error"
+        save(job)
+        events.job(job)
+        return True
+
+    # 1. Single job links: always opened (no specialty filter).
+    for refnr in settings.job_refs:
+        if not process(Job(refnr, "", "", "", ""), filtered=False):
+            break
+
+    # 2. Search links (or the default search), page by page.
+    sources = settings.search_urls or [build_search_url(settings.was, settings.wo, settings.umkreis)]
+    totals: dict[str, int] = {}
+    for number, url in enumerate(sources, 1):
+        page_number, last_page = 1, 1
+        label = f"link {number}/{len(sources)}, " if len(sources) > 1 else ""
+        while (page_number <= min(last_page, settings.max_pages)
+               and counter["opened"] < settings.max_jobs):
+            events.status(f"Reading search results ({label}page {page_number})...")
+            result = session.search_url(url, page_number, only_elektroniker=settings.filter_elektroniker)
+            if page_number == 1:
+                for name, count in result.specialties.items():
+                    totals[name] = totals.get(name, 0) + count
+                events.specialties(dict(totals))
+                events.status(f"{result.max_results} results for this search...")
+            last_page = result.last_page
+            for job in result.jobs:
+                if not process(job, filtered=True):
+                    break
+            page_number += 1
+        if counter["opened"] >= settings.max_jobs:
+            break
+    return dict(counter)

@@ -19,7 +19,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlparse
 
 BASE = "https://www.arbeitsagentur.de/jobsuche"
 
@@ -94,6 +94,68 @@ def build_search_url(was: str = "Elektroniker/in", wo: str = "", umkreis: int | 
 
 def detail_url(refnr: str) -> str:
     return f"{BASE}/jobdetail/{refnr}"
+
+
+# --------------------------------------------------------------------------
+# Links pasted by the user (search pages, single jobs, reference numbers)
+# --------------------------------------------------------------------------
+
+_REFNR_RE = re.compile(r"^\d{3,6}-[0-9A-Za-z.]+(?:-[0-9A-Za-z.]+)*-S$")
+
+
+class LinkError(ValueError):
+    """A pasted line is not a Jobsuche link."""
+
+
+def classify_link(text: str) -> tuple[str, str]:
+    """('search', url) for a Jobsuche search page, ('job', refnr) for a job
+    page or a bare reference number.  Raises LinkError otherwise."""
+    text = text.strip().strip("<>\"'")
+    if _REFNR_RE.match(text):
+        return "job", text
+    url = text if "://" in text else "https://" + text
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not (host == "arbeitsagentur.de" or host.endswith(".arbeitsagentur.de")):
+        raise LinkError(f"Kein Link der Jobsuche (arbeitsagentur.de): {text}")
+    path = parsed.path.rstrip("/")
+    if path.startswith("/jobsuche/jobdetail/"):
+        refnr = path.split("/jobsuche/jobdetail/", 1)[1].split("/")[0]
+        if refnr:
+            return "job", refnr
+    if path == "/jobsuche/suche":
+        params = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=False) if k != "page"]
+        return "search", f"{BASE}/suche?{urlencode(params)}"
+    raise LinkError(f"Weder Suchergebnis- noch Stellen-Link der Jobsuche: {text}")
+
+
+def parse_links(text: str) -> tuple[list[str], list[str], list[str]]:
+    """Split pasted text (one link per line) into search URLs, job reference
+    numbers and error messages."""
+    searches: list[str] = []
+    jobs: list[str] = []
+    errors: list[str] = []
+    for line in (text or "").splitlines():
+        if not line.strip():
+            continue
+        try:
+            kind, value = classify_link(line)
+        except LinkError as exc:
+            errors.append(str(exc))
+            continue
+        target = searches if kind == "search" else jobs
+        if value not in target:
+            target.append(value)
+    return searches, jobs, errors
+
+
+def with_page(url: str, page: int) -> str:
+    """The same search URL for result page *page* (all filters kept)."""
+    parsed = urlparse(url)
+    params = [(k, v) for k, v in parse_qsl(parsed.query) if k != "page"]
+    if page > 1:
+        params.append(("page", str(page)))
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{urlencode(params)}"
 
 
 def _address(location: dict | None) -> dict[str, str]:
@@ -175,7 +237,9 @@ class SearchPage:
         return max(1, -(-self.max_results // max(1, self.size)))
 
 
-def parse_search(state: dict[str, Any]) -> SearchPage:
+def parse_search(state: dict[str, Any], only_elektroniker: bool = True) -> SearchPage:
+    """Jobs of a search result page.  With only_elektroniker=False every job
+    of the page is kept (the user's own search link decides what is shown)."""
     result = state.get("suchergebnis")
     if not isinstance(result, dict):
         raise StateNotFound("No search result data on the page.")
@@ -184,8 +248,9 @@ def parse_search(state: dict[str, Any]) -> SearchPage:
     for item in items:
         berufe = [item.get("hauptberuf") or ""] + list(item.get("alleBerufe") or [])
         beruf = next((b for b in berufe if is_elektroniker(b)), "")
-        if not beruf:
+        if not beruf and only_elektroniker:
             continue
+        beruf = beruf or item.get("hauptberuf") or ""
         loc = _address((item.get("stellenlokationen") or [None])[0])
         jobs.append(Job(
             refnr=item.get("referenznummer") or "",

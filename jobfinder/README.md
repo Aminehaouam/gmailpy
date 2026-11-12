@@ -9,7 +9,8 @@ your browser, and tells you when the site asks for a **Sicherheitsabfrage**
 
 1. Opens Microsoft Edge (or Chrome) in a visible window with its own profile.
 2. Runs the search *Ausbildung · Elektroniker/in* (optionally around a place
-   with a radius) and reads the result pages.
+   with a radius) – or your own Jobsuche links, see *Own links* below – and
+   reads the result pages.
 3. Keeps only the Beruf **Elektroniker/in** – in every specialty you tick
    (Betriebstechnik, Energie- und Gebäudetechnik, Automatisierungstechnik,
    Geräte und Systeme, Informations- und Systemtechnik, Maschinen und
@@ -67,6 +68,34 @@ downloaded folder.)
 3. When the alert sounds: solve the Sicherheitsabfrage in the browser.
 4. Double-click a job to open it in your normal browser; **E-Mail kopieren**
    copies the address.
+
+### Own links (e.g. only Energie- und Gebäudetechnik)
+
+Instead of the general Elektroniker/in search you can give the app the exact
+search you want:
+
+1. In the Jobsuche, set up the search yourself (e.g. Beruf *Elektroniker/in –
+   Energie- und Gebäudetechnik*, place, radius, any other filters) and copy
+   the address from the browser's address bar.
+2. Paste it into **Eigene Links aus der Jobsuche** (button **Einfügen**
+   pastes from the clipboard). One link per line – you can add several
+   searches.
+3. Click **Suche starten**.
+
+* **Search links** (`…/jobsuche/suche?…`) keep all their filters; the app
+  goes through all their result pages.
+* **Job links** (`…/jobsuche/jobdetail/…`) or bare reference numbers
+  (e.g. `10000-1208539150-S`) open exactly that job – always collected, no
+  specialty filter. They are processed first.
+* When links are entered, *Ort / PLZ* and *Umkreis* on the left are not used.
+  *Max. Stellen pro Suchlauf* and *Bereits gesammelte Stellen überspringen*
+  still apply; a job found by several links is opened only once.
+* **Nur Elektroniker/in der gewählten Fachrichtungen übernehmen**: on by
+  default. Untick it to collect every job of your search links, whatever its
+  Beruf (e.g. for a search for a different profession).
+* Only links to arbeitsagentur.de are accepted; a wrong line is reported
+  before the search starts. The links are remembered for the next start;
+  **Leeren** clears them.
 
 ## Data
 
