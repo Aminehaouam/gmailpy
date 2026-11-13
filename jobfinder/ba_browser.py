@@ -174,6 +174,13 @@ class BrowserSession:
             self._check_stop()
             time.sleep(0.1)
 
+    def wait(self, seconds: float) -> None:
+        """Stoppable wait (e.g. before trying a page again)."""
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            self._check_stop()
+            time.sleep(0.1)
+
     def goto(self, url: str) -> str:
         """Open *url* and return the server-rendered HTML."""
         self._check_stop()
@@ -326,6 +333,10 @@ class BrowserSession:
 # One complete run
 # --------------------------------------------------------------------------
 
+class SearchPageError(RuntimeError):
+    """A search result page could not be read even after several tries."""
+
+
 @dataclass
 class RunSettings:
     was: str = "Elektroniker/in"
@@ -333,7 +344,6 @@ class RunSettings:
     umkreis: int | None = None
     specialties: set[str] = field(default_factory=set)
     max_jobs: int = 30
-    max_pages: int = 20
     want_contact: bool = True
     skip_known: bool = True
     captcha_timeout: float = 600.0
@@ -343,6 +353,12 @@ class RunSettings:
     job_refs: list[str] = field(default_factory=list)
     # Keep only Elektroniker/in in the selected specialties.
     filter_elektroniker: bool = True
+    # Result page where the previous run of a search stopped (search URL ->
+    # page).  The run continues there and afterwards reads pages 1.. again
+    # for new listings, so a long search does not start from the top again.
+    start_pages: dict[str, int] = field(default_factory=dict)
+    # Pauses before trying a search page again that could not be read.
+    page_retries: tuple[float, ...] = (15.0, 45.0, 90.0)
 
 
 @dataclass
@@ -352,14 +368,39 @@ class RunEvents:
     specialties: Callable[[dict], None] = lambda counts: None
     captcha: Callable[[Job], None] = lambda job: None
     captcha_done: Callable[[Job, bool], None] = lambda job, solved: None
+    # (search URL, result page being read); page 0 = all pages of it read.
+    position: Callable[[str, int], None] = lambda url, page: None
+
+
+def _load_search_page(session: BrowserSession, url: str, page_number: int, settings: RunSettings,
+                      events: RunEvents) -> SearchPage:
+    """One result page; a page that fails to load is tried again after a
+    pause (slow connection, the site briefly unavailable)."""
+    waits = list(settings.page_retries)
+    while True:
+        try:
+            return session.search_url(url, page_number, only_elektroniker=settings.filter_elektroniker)
+        except StopRequested:
+            raise
+        except Exception as exc:
+            if not waits:
+                raise SearchPageError(f"Search result page {page_number} could not be read "
+                                      f"({type(exc).__name__}: {exc}).") from exc
+            delay = waits.pop(0)
+            log.warning("Search page %s of %s failed (%s); trying again in %.0f s", page_number, url, exc, delay)
+            events.status(f"Search page {page_number} could not be loaded - trying again in {delay:.0f} s...")
+            session.wait(delay)
 
 
 def run(session: BrowserSession, settings: RunSettings, known: Callable[[str], bool],
         save: Callable[[Job], None], events: RunEvents) -> dict:
     """Open the jobs of the user's job links, then go through the search
     results (the user's search links, or the search built from place and
-    radius) page by page.  Returns a summary."""
-    counter = {"opened": 0, "found": 0, "skipped": 0}
+    radius) page by page - all pages, as many as the search has.  Returns a
+    summary; "limit_reached" tells whether the run ended because of the job
+    limit, "complete" whether every result page was read."""
+    counter = {"opened": 0, "found": 0, "skipped": 0, "pages": 0,
+               "limit_reached": False, "complete": False}
     seen: set[str] = set()
 
     def process(job: Job, filtered: bool) -> bool:
@@ -374,6 +415,7 @@ def run(session: BrowserSession, settings: RunSettings, known: Callable[[str], b
             counter["skipped"] += 1
             return True
         if counter["opened"] >= settings.max_jobs:
+            counter["limit_reached"] = True
             return False
         counter["opened"] += 1
         events.status(f"Opening job {counter['opened']}/{settings.max_jobs}: "
@@ -394,28 +436,47 @@ def run(session: BrowserSession, settings: RunSettings, known: Callable[[str], b
     # 1. Single job links: always opened (no specialty filter).
     for refnr in settings.job_refs:
         if not process(Job(refnr, "", "", "", ""), filtered=False):
-            break
+            return dict(counter)
 
     # 2. Search links (or the default search), page by page.
     sources = settings.search_urls or [build_search_url(settings.was, settings.wo, settings.umkreis)]
     totals: dict[str, int] = {}
     for number, url in enumerate(sources, 1):
-        page_number, last_page = 1, 1
         label = f"link {number}/{len(sources)}, " if len(sources) > 1 else ""
-        while (page_number <= min(last_page, settings.max_pages)
-               and counter["opened"] < settings.max_jobs):
-            events.status(f"Reading search results ({label}page {page_number})...")
-            result = session.search_url(url, page_number, only_elektroniker=settings.filter_elektroniker)
-            if page_number == 1:
+        # Continue one page before the previous stop (the list shifts a
+        # little when new listings appear), then wrap round to page 1.
+        start = max(1, int(settings.start_pages.get(url) or 1) - 1)
+        page_number, wrapped, last_page = start, start == 1, None
+        first = True
+        while True:
+            if last_page is not None and page_number > last_page:
+                if wrapped:
+                    break
+                wrapped, page_number = True, 1
+                continue
+            if wrapped and start > 1 and page_number >= start:
+                break  # full circle
+            events.position(url, page_number)
+            events.status(f"Reading search results ({label}page {page_number}"
+                          f"{f' of {last_page}' if last_page else ''})...")
+            result = _load_search_page(session, url, page_number, settings, events)
+            if first:
+                first = False
                 for name, count in result.specialties.items():
                     totals[name] = totals.get(name, 0) + count
                 events.specialties(dict(totals))
                 events.status(f"{result.max_results} results for this search...")
+            counter["pages"] += 1
             last_page = result.last_page
+            if not result.all_count:          # behind the last page (list got shorter)
+                last_page = min(last_page, page_number - 1)
+                if page_number == 1:
+                    break
+                continue
             for job in result.jobs:
                 if not process(job, filtered=True):
-                    break
+                    return dict(counter)
             page_number += 1
-        if counter["opened"] >= settings.max_jobs:
-            break
+        events.position(url, 0)
+    counter["complete"] = True
     return dict(counter)

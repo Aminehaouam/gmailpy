@@ -187,7 +187,8 @@ def test_run_filters_specialties_and_respects_limits():
     summary = run(session, RunSettings(specialties={"Betriebstechnik"}, max_jobs=10),
                   known=lambda r: False, save=saved.append, events=events)
     assert session.opened == ["P1-0", "P1-2", "P2-0"]
-    assert summary == {"opened": 3, "found": 3, "skipped": 0} and len(saved) == 3 == len(seen)
+    assert {k: summary[k] for k in ("opened", "found", "skipped")} == {"opened": 3, "found": 3, "skipped": 0}
+    assert summary["complete"] and len(saved) == 3 == len(seen)
     session2 = FakeSession(pages)
     run(session2, RunSettings(specialties=ALL, max_jobs=2), known=lambda r: False, save=lambda j: None,
         events=RunEvents())

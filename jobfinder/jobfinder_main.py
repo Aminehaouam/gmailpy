@@ -43,6 +43,13 @@ def self_test() -> int:
         ok = False
         print(f"[FAIL] Parser: {exc}")
     try:
+        from jobfinder_import import read_file
+        jobs, _ = read_file(HERE / "tests" / "files" / "gespeichert_excel.xlsx")
+        print(f"[OK] Import of saved lists: {len(jobs)} jobs read from the sample Excel file")
+    except Exception as exc:
+        ok = False
+        print(f"[FAIL] Import of saved lists: {exc}")
+    try:
         import importlib
         importlib.import_module("playwright.sync_api")
         print("[OK] Playwright library")

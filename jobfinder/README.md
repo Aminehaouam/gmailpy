@@ -43,6 +43,13 @@ your browser, and tells you when the site asks for a **Sicherheitsabfrage**
    Excel/CSV speichern** exports all fields – choose *JSON* in the save
    dialog to get the complete data in one file (e.g. for Claude, which can
    then look up anything else).
+7. **No page limit:** a search is read to its last result page (the
+   nationwide Elektroniker/in search has about 7,700 results on 310 pages).
+   When a run ends because of *Max. Stellen pro Suchlauf* (up to 10,000) or
+   you click *Stopp*, the next run **continues on that result page**
+   instead of starting from the top again; after the last page it goes
+   through pages 1… once more to pick up new listings. A result page that
+   does not load is tried again three times (after 15 s, 45 s and 90 s).
 
 The cookie banner of the site is answered with *Alle Cookies ablehnen*.
 
@@ -96,6 +103,25 @@ search you want:
 * Only links to arbeitsagentur.de are accepted; a wrong line is reported
   before the search starts. The links are remembered for the next start;
   **Leeren** clears them.
+
+### Import saved lists ("boost")
+
+**Gespeicherte Listen importieren** fills the list from files you saved
+earlier – choose several files at once:
+
+* the CSV files made with *Als Excel/CSV speichern*, also after opening and
+  saving them in Excel (as **.xlsx** or again as .csv),
+* JSON exports,
+* files of every earlier version of the app.
+
+The same job in several files becomes one entry: the version with the
+contact details wins and missing fields are filled from the others; the
+date *Gefunden am* of the first file is kept. Jobs whose contact details
+were already read (or that have none / are handled by a partner portal) are
+**not opened again** by the next search – it only opens new jobs and jobs
+whose Sicherheitsabfrage was still open. Excel's changes are undone
+(dates turned into numbers, PLZ without the leading 0). A summary shows how
+many jobs were read, added and completed.
 
 ## Data
 

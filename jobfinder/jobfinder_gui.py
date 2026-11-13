@@ -21,9 +21,11 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
 from alert_sound import play_attention, play_done
-from ba_browser import BrowserNotAvailable, BrowserSession, RunEvents, RunSettings, StopRequested, run
+from ba_browser import (BrowserNotAvailable, BrowserSession, RunEvents, RunSettings, SearchPageError,
+                        StopRequested, run)
 from ba_parser import KNOWN_SPECIALTIES, OTHER_SPECIALTY, Job, parse_links
 from jobfinder_db import JobStore
+from jobfinder_import import FILE_TYPES, read_files
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +47,9 @@ RADIUS_CHOICES = ["ganz Deutschland", "10 km", "25 km", "50 km", "100 km", "200 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "wo": "", "umkreis": "50 km", "max_jobs": 30, "want_contact": True, "skip_known": True,
     "specialties": KNOWN_SPECIALTIES + [OTHER_SPECIALTY], "links": "", "filter_elektroniker": True,
+    "resume_pages": {},     # search URL -> result page where the last run stopped
 }
+MAX_JOBS_LIMIT = 10000
 
 
 def data_dir() -> Path:
@@ -69,6 +73,29 @@ def load_settings(path: Path) -> dict[str, Any]:
     except (OSError, ValueError):
         pass
     return settings
+
+
+def _n(number: int) -> str:
+    return f"{number:,}".replace(",", ".")
+
+
+def import_report(result, counts: dict[str, int]) -> str:
+    """Summary of an import for the user."""
+    lines = [f"{_n(result.files)} Datei(en) gelesen, {_n(result.rows)} Stellen-Zeilen."]
+    if result.jobs:
+        lines.append(f"{_n(len(result.jobs))} verschiedene Stellen"
+                     + (f" ({_n(result.duplicates)} Zeilen waren doppelt)." if result.duplicates else "."))
+        lines.append(f"Neu in der Liste: {_n(counts['new'])}, ergänzt: {_n(counts['updated'])}, "
+                     f"schon vorhanden: {_n(counts['unchanged'])}.")
+        lines.append(f"{_n(result.complete)} davon sind fertig gelesen – die Suche überspringt sie "
+                     "und öffnet sie nicht noch einmal.")
+    if result.unreadable:
+        lines.append(f"{_n(result.unreadable)} Zeilen ohne Referenznummer/Link wurden übersprungen.")
+    if result.errors:
+        lines.append("")
+        lines.append("Nicht gelesen:")
+        lines.extend(f"• {error}" for error in result.errors)
+    return "\n".join(lines)
 
 
 def job_summary(job: Job) -> str:
@@ -198,6 +225,7 @@ class JobFinderApp(tk.Tk):
         self.captcha_window: CaptchaAlert | None = None
         self._captcha_repeat: str | None = None
         self._items: dict[str, Job] = {}
+        self._rows: dict[str, str] = {}      # refnr -> tree item
         self.last_summary: dict | None = None
 
         self.title(f"{APP_NAME} {APP_VERSION}")
@@ -236,7 +264,7 @@ class JobFinderApp(tk.Tk):
         rows = [("Ort / PLZ (leer = ganz Deutschland):", ttk.Entry(search, textvariable=self.wo_var, width=26)),
                 ("Umkreis:", ttk.Combobox(search, textvariable=self.radius_var, values=RADIUS_CHOICES,
                                           state="readonly", width=24)),
-                ("Max. Stellen pro Suchlauf:", ttk.Spinbox(search, from_=1, to=500, textvariable=self.max_var,
+                ("Max. Stellen pro Suchlauf:", ttk.Spinbox(search, from_=1, to=MAX_JOBS_LIMIT, textvariable=self.max_var,
                                                          width=8))]
         for row, (label, widget) in enumerate(rows):
             ttk.Label(search, text=label, style="Card.TLabel").grid(row=row * 2, column=0, sticky="w")
@@ -304,6 +332,8 @@ class JobFinderApp(tk.Tk):
         ttk.Button(toolbar, text="Stelle im Browser öffnen", command=self.open_selected).pack(side="left")
         ttk.Button(toolbar, text="E-Mail kopieren", command=self.copy_email).pack(side="left", padx=(6, 0))
         ttk.Button(toolbar, text="Als Excel/CSV speichern", command=self.export).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="Gespeicherte Listen importieren",
+                   command=self.import_files).pack(side="left", padx=(6, 0))
         ttk.Button(toolbar, text="Liste leeren", command=self.clear).pack(side="right")
         self.count_label = ttk.Label(toolbar, style="Card.TLabel", foreground=C["muted"])
         self.count_label.pack(side="right", padx=10)
@@ -346,23 +376,47 @@ class JobFinderApp(tk.Tk):
     # -- results --------------------------------------------------------------
     def reload_results(self, highlight: set[str] | None = None) -> None:
         self.tree.delete(*self.tree.get_children())
-        self._items = {}
+        self._items, self._rows = {}, {}
         jobs = self.store.all()
         for job, first_seen in jobs:
             self._insert(job, first_seen, new=bool(highlight and job.refnr in highlight))
-        self.count_label.configure(text=f"{len(jobs)} Stellen gespeichert")
+        self._update_count()
 
-    def _insert(self, job: Job, first_seen: str, new: bool = False, index: int | str = "end") -> None:
+    def _update_count(self) -> None:
+        self.count_label.configure(text=f"{len(self._rows):,} Stellen gespeichert".replace(",", "."))
+
+    @staticmethod
+    def _row(job: Job, first_seen: str, new: bool) -> tuple[tuple, list[str]]:
         tags = []
         if job.contact_status == "captcha-skipped":
             tags.append("captcha")
         if new:
             tags.append("new")
-        item = self.tree.insert("", index, values=(
-            first_seen.replace("T", " ")[:16], job.specialty or "–", job.company, job.ort, job.contact_person,
-            ", ".join(job.emails), STATUS_TEXT.get(job.contact_status, job.contact_status),
-        ), tags=tags)
+        values = (first_seen.replace("T", " ")[:16], job.specialty or "–", job.company, job.ort,
+                  job.contact_person, ", ".join(job.emails), STATUS_TEXT.get(job.contact_status, job.contact_status))
+        return values, tags
+
+    def _insert(self, job: Job, first_seen: str, new: bool = False, index: int | str = "end") -> None:
+        values, tags = self._row(job, first_seen, new)
+        item = self.tree.insert("", index, values=values, tags=tags)
         self._items[item] = job
+        self._rows[job.refnr] = item
+
+    def _show_job(self, job: Job) -> None:
+        """Show one saved job: update its row, or add it at the top (no
+        reload of the whole list - it can hold thousands of jobs)."""
+        job = self.store.get(job.refnr) or job       # as saved (merged)
+        first_seen = self.store.first_seen(job.refnr) or datetime.now().isoformat(timespec="seconds")
+        item = self._rows.get(job.refnr)
+        if item is not None and self.tree.exists(item):
+            values, tags = self._row(job, first_seen, new=True)
+            self.tree.item(item, values=values, tags=tags)
+            self._items[item] = job
+            if self.tree.selection() == (item,):
+                self._show_details()
+        else:
+            self._insert(job, first_seen, new=True, index=0)
+            self._update_count()
 
     def selected_job(self) -> Job | None:
         selection = self.tree.selection()
@@ -392,6 +446,33 @@ class JobFinderApp(tk.Tk):
         else:
             self._set_status("Für diese Stelle ist keine E-Mail-Adresse bekannt.")
 
+    def import_files(self) -> None:
+        """Fill the list from files saved earlier (CSV / Excel / JSON)."""
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo(APP_NAME, "Bitte zuerst die Suche stoppen.", parent=self)
+            return
+        patterns = " ".join(f"*{suffix}" for suffix in FILE_TYPES)
+        names = filedialog.askopenfilenames(
+            parent=self, title="Gespeicherte Stellenlisten importieren",
+            filetypes=[("Gespeicherte Listen (CSV, Excel, JSON)", patterns), ("Alle Dateien", "*.*")])
+        if not names:
+            return
+        self.configure(cursor="watch")
+        self.update_idletasks()
+        try:
+            result = read_files([Path(n) for n in names])
+            counts = self.store.import_jobs(list(result.jobs.values())) if result.jobs else \
+                {"new": 0, "updated": 0, "unchanged": 0}
+        except Exception as exc:
+            log.exception("Import failed")
+            messagebox.showerror(APP_NAME, f"Import fehlgeschlagen: {exc}", parent=self)
+            return
+        finally:
+            self.configure(cursor="")
+        self.reload_results()
+        self._set_status(f"Import: {counts['new']} neue Stellen, {counts['updated']} ergänzt.")
+        messagebox.showinfo(APP_NAME, import_report(result, counts), parent=self)
+
     def export(self) -> None:
         name = f"Elektroniker_Ausbildung_{datetime.now():%Y-%m-%d}.csv"
         target = filedialog.asksaveasfilename(
@@ -417,18 +498,29 @@ class JobFinderApp(tk.Tk):
         return RunSettings(
             wo=self.wo_var.get().strip(), umkreis=umkreis if self.wo_var.get().strip() else None,
             specialties={name for name, var in self.spec_vars.items() if var.get()},
-            max_jobs=max(1, int(self.max_var.get() or 30)), want_contact=bool(self.contact_var.get()),
+            max_jobs=self._max_jobs(), want_contact=bool(self.contact_var.get()),
             skip_known=bool(self.skip_var.get()), search_urls=searches, job_refs=jobs,
-            filter_elektroniker=bool(self.filter_var.get()))
+            filter_elektroniker=bool(self.filter_var.get()),
+            start_pages=dict(self.settings.get("resume_pages") or {}))
+
+    def _max_jobs(self) -> int:
+        try:
+            value = int(self.max_var.get() or 30)
+        except (tk.TclError, ValueError):
+            value = 30
+        return max(1, min(MAX_JOBS_LIMIT, value))
 
     def _save_settings(self, settings: RunSettings) -> None:
-        data = {"wo": settings.wo, "umkreis": self.radius_var.get(), "max_jobs": settings.max_jobs,
-                "want_contact": settings.want_contact, "skip_known": settings.skip_known,
-                "specialties": sorted(settings.specialties),
-                "links": self.links_text.get("1.0", "end").strip(),
-                "filter_elektroniker": settings.filter_elektroniker}
+        self.settings.update({
+            "wo": settings.wo, "umkreis": self.radius_var.get(), "max_jobs": settings.max_jobs,
+            "want_contact": settings.want_contact, "skip_known": settings.skip_known,
+            "specialties": sorted(settings.specialties), "links": self.links_text.get("1.0", "end").strip(),
+            "filter_elektroniker": settings.filter_elektroniker})
+        self._write_settings()
+
+    def _write_settings(self) -> None:
         try:
-            self.settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.settings_path.write_text(json.dumps(self.settings, ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError:
             pass
 
@@ -477,6 +569,7 @@ class JobFinderApp(tk.Tk):
             specialties=lambda counts: self._post("specialties", counts),
             captcha=lambda job: self._post("captcha", job),
             captcha_done=lambda job, solved: self._post("captcha_done", job, solved),
+            position=lambda url, page: self._post("position", url, page),
         )
         try:
             session.start()
@@ -487,6 +580,11 @@ class JobFinderApp(tk.Tk):
             self._post("done", {"stopped": True})
         except BrowserNotAvailable as exc:
             self._post("error", str(exc))
+        except SearchPageError as exc:
+            log.warning("Search stopped: %s", exc)
+            self._post("error", "Die Jobsuche hat eine Ergebnisseite auch nach mehreren Versuchen nicht "
+                       f"geliefert:\n{exc}\n\nAlles bis hierhin ist gespeichert. Beim nächsten Start geht "
+                       "es auf dieser Seite weiter.")
         except Exception as exc:
             log.exception("Search failed")
             self._post("error", f"{type(exc).__name__}: {exc}")
@@ -508,7 +606,17 @@ class JobFinderApp(tk.Tk):
 
     def _on_job(self, job: Job) -> None:
         self.new_refs.add(job.refnr)
-        self.reload_results(highlight=self.new_refs)
+        self._show_job(job)
+
+    def _on_position(self, url: str, page: int) -> None:
+        """Remember where the search is, so the next run continues there."""
+        resume = dict(self.settings.get("resume_pages") or {})
+        if page > 0:
+            resume[url] = page
+        else:
+            resume.pop(url, None)
+        self.settings["resume_pages"] = dict(list(resume.items())[-30:])
+        self._write_settings()
 
     def _on_specialties(self, counts: dict) -> None:
         for name, check in self.spec_checks.items():
@@ -564,9 +672,17 @@ class JobFinderApp(tk.Tk):
         if summary.get("stopped"):
             self._set_status("Angehalten.")
             return
-        with_email = sum(1 for job, _ in self.store.all() if job.refnr in self.new_refs and job.emails)
+        with_email = sum(1 for job in self._items.values() if job.refnr in self.new_refs and job.emails)
+        if summary.get("limit_reached"):
+            reason = (f" Grenze von {summary['opened']} Stellen pro Suchlauf erreicht – "
+                      "„Suche starten“ macht dort weiter.")
+        elif summary.get("complete"):
+            reason = f" Alle Ergebnisseiten gelesen ({summary.get('pages', 0)} Seiten)."
+        else:
+            reason = ""
         self._set_status(f"Fertig: {summary['opened']} Stellen geöffnet ({with_email} mit E-Mail), "
-                         f"{summary['found']} passende gefunden, {summary['skipped']} bereits bekannt übersprungen.")
+                         f"{summary['found']} passende gefunden, {summary['skipped']} bereits bekannt "
+                         f"übersprungen.{reason}")
         self.done_sound(None)
 
     def _on_error(self, message: str) -> None:

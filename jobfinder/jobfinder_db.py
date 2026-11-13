@@ -42,6 +42,39 @@ CSV_COLUMNS = [
 ]
 
 
+# How far a job's contact details got (the better record wins when merging).
+_STATUS_RANK = {"ok": 4, "none": 3, "external": 3, "captcha-skipped": 1}
+COMPLETE_STATUSES = ("ok", "none", "external")
+
+
+def _filled(job: Job) -> int:
+    return sum(1 for value in asdict(job).values() if value)
+
+
+def merge_jobs(new: Job, old: Job, *, by_amount: bool = False) -> Job:
+    """One record from two records of the same job.
+
+    The record with the better contact status wins (on a tie: *new*, or with
+    by_amount the one with more data); its empty fields are filled from the
+    other one, and the e-mail addresses and phone numbers of both are kept.
+    """
+    def key(job: Job) -> tuple:
+        return (_STATUS_RANK.get(job.contact_status, 0), _filled(job) if by_amount else 0)
+    first, second = (new, old) if key(new) >= key(old) else (old, new)
+    data, other = asdict(first), asdict(second)
+    for name, value in other.items():
+        if name in ("emails", "phones"):
+            seen = {str(v).casefold() for v in data[name]}
+            data[name] = list(data[name]) + [v for v in value if str(v).casefold() not in seen]
+        elif not data[name] and value:
+            data[name] = value
+    return Job(**data)
+
+
+def _job_from_json(data: str) -> Job:
+    return Job(**{k: v for k, v in json.loads(data).items() if k in _JOB_FIELDS})
+
+
 class JobStore:
     def __init__(self, path: Path):
         self.path = path
@@ -62,26 +95,61 @@ class JobStore:
         if row is None:
             return False
         status = json.loads(row[0]).get("contact_status", "")
-        return status in ("ok", "none", "external")
+        return status in COMPLETE_STATUSES
 
     def save(self, job: Job) -> None:
+        """Store a job that was just read (merged with what was known: a
+        failed second visit does not wipe contact details read before)."""
         now = datetime.now().isoformat(timespec="seconds")
-        data = json.dumps(asdict(job), ensure_ascii=False)
         with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT data FROM jobs WHERE refnr = ?", (job.refnr,)).fetchone()
+            if row is not None:
+                job = merge_jobs(job, _job_from_json(row[0]))
             conn.execute(
                 """INSERT INTO jobs (refnr, data, first_seen, updated) VALUES (?, ?, ?, ?)
                    ON CONFLICT(refnr) DO UPDATE SET data = excluded.data, updated = excluded.updated""",
-                (job.refnr, data, now, now))
+                (job.refnr, json.dumps(asdict(job), ensure_ascii=False), now, now))
+
+    def first_seen(self, refnr: str) -> str | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT first_seen FROM jobs WHERE refnr = ?", (refnr,)).fetchone()
+        return row[0] if row else None
+
+    def get(self, refnr: str) -> Job | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT data FROM jobs WHERE refnr = ?", (refnr,)).fetchone()
+        return _job_from_json(row[0]) if row else None
+
+    def import_jobs(self, items: list[tuple[Job, str]]) -> dict[str, int]:
+        """Add jobs read from saved files, keeping the date they were first
+        found.  Jobs already in the list are merged.  One transaction."""
+        counts = {"new": 0, "updated": 0, "unchanged": 0}
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._lock, self._connect() as conn:
+            for job, first_seen in items:
+                first_seen = first_seen or now
+                row = conn.execute("SELECT data, first_seen FROM jobs WHERE refnr = ?", (job.refnr,)).fetchone()
+                if row is None:
+                    conn.execute("INSERT INTO jobs (refnr, data, first_seen, updated) VALUES (?, ?, ?, ?)",
+                                 (job.refnr, json.dumps(asdict(job), ensure_ascii=False), first_seen, now))
+                    counts["new"] += 1
+                    continue
+                old = _job_from_json(row[0])
+                merged = merge_jobs(job, old, by_amount=True)
+                earliest = min(first_seen, row[1])
+                if merged == old and earliest == row[1]:
+                    counts["unchanged"] += 1
+                    continue
+                conn.execute("UPDATE jobs SET data = ?, first_seen = ?, updated = ? WHERE refnr = ?",
+                             (json.dumps(asdict(merged), ensure_ascii=False), earliest, now, job.refnr))
+                counts["updated"] += 1
+        return counts
 
     def all(self) -> list[tuple[Job, str]]:
         """All jobs, newest first, with the date they were first found."""
         with self._lock, self._connect() as conn:
             rows = conn.execute("SELECT data, first_seen FROM jobs ORDER BY first_seen DESC, rowid DESC").fetchall()
-        result = []
-        for data, first_seen in rows:
-            values = {k: v for k, v in json.loads(data).items() if k in _JOB_FIELDS}
-            result.append((Job(**values), first_seen))
-        return result
+        return [(_job_from_json(data), first_seen) for data, first_seen in rows]
 
     def delete_all(self) -> None:
         with self._lock, self._connect() as conn:
