@@ -2,6 +2,7 @@
 
 import os
 import time
+from pathlib import Path
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -122,7 +123,7 @@ def test_unfinished_drafts_are_not_sent(sender, backend, folder, make_pdf, subje
 def test_waits_and_retries_until_draft_exists(sender, backend, folder, make_pdf, monkeypatch):
     make_pdf(TROMPETTER, age=30)
     first = sender.run_once(folder, dry_run=False)
-    assert first.kind == WAITING and first.retry_in == 3
+    assert first.kind == WAITING and first.retry_in == 1.0
     lists = len(backend.method_calls("drafts.list"))
     assert sender.run_once(folder, dry_run=False).kind == WAITING   # not due: no Gmail call
     assert len(backend.method_calls("drafts.list")) == lists
@@ -201,6 +202,8 @@ def test_success_chime_is_valid_wav():
 
 
 def test_old_config_gets_new_fast_timings(paths):
+    """Configs of older versions get the current (faster) timings; the
+    user's own choices stay."""
     import json
     from config import Config
     paths.config_file.write_text(json.dumps({
@@ -210,9 +213,199 @@ def test_old_config_gets_new_fast_timings(paths):
     }), encoding="utf-8")
     cfg = Config.load(paths)
     assert cfg.data["draft_settle_seconds"] == 0.0
-    assert cfg.data["auto_retry_seconds"] == 3.0
-    assert cfg.watch_interval_ms == 2000
-    assert cfg.scanner["min_file_age_seconds"] == 1.0
+    assert cfg.data["auto_retry_seconds"] == 1.0
+    assert cfg.watch_interval_ms == 500
+    assert cfg.scanner["min_file_age_seconds"] == 0.2 and cfg.scanner["stability_check_seconds"] == 0.1
+    assert cfg.data["auto_batch"] is True
     assert cfg.auto_send is True and cfg.dry_run is False      # user choices are kept
     cfg.save()
-    assert Config.load(paths).data["config_version"] == 2
+    assert Config.load(paths).data["config_version"] == 3
+
+
+def test_version_2_config_gets_version_3_timings(paths):
+    import json
+    from config import Config
+    paths.config_file.write_text(json.dumps({
+        "config_version": 2, "auto_send": True, "dry_run": False, "auto_retry_seconds": 3.0,
+        "watch_interval_seconds": 2.0, "scanner": {"min_file_age_seconds": 1.0, "stability_check_seconds": 0.3},
+    }), encoding="utf-8")
+    cfg = Config.load(paths)
+    assert cfg.watch_interval_ms == 500 and cfg.data["auto_retry_seconds"] == 1.0
+    assert cfg.scanner["min_file_age_seconds"] == 0.2
+    assert cfg.auto_send is True and cfg.dry_run is False
+
+
+# --------------------------------------------------------------------------
+# Speed: as few Gmail requests as possible, the same checks
+# --------------------------------------------------------------------------
+
+def gets(backend, fmt):
+    return [kw for kw in backend.method_calls("drafts.get") if kw.get("format") == fmt]
+
+
+def test_prepared_ahead_send_needs_four_gmail_requests(sender, backend, folder, make_pdf):
+    """Draft read ahead of time while idle: list (current versions), update,
+    read back (verification) and send - nothing else."""
+    target = draft(backend, "Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de")
+    assert sender.run_once(folder, dry_run=False).kind == IDLE        # empty folder: reads ahead
+    assert len(gets(backend, "raw")) == 1
+    backend.calls.clear()
+    make_pdf(TROMPETTER, age=30)
+    result = sender.run_once(folder, dry_run=False)
+    assert result.kind == SENT, result.message
+    assert [s["draft_id"] for s in backend.sent] == [target]
+    assert [m for m, _ in backend.calls] == ["drafts.list", "drafts.update", "drafts.get", "drafts.send"]
+    assert gets(backend, "full") and not gets(backend, "raw") and not gets(backend, "minimal")
+
+
+def test_without_reading_ahead_no_extra_version_check(sender, backend, folder, make_pdf):
+    draft(backend, "Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de")
+    make_pdf(TROMPETTER, age=30)
+    assert sender.run_once(folder, dry_run=False).kind == SENT
+    assert not gets(backend, "minimal")       # the draft list was read a moment before
+    assert len(gets(backend, "raw")) == 1
+
+
+def test_edited_draft_is_read_again(sender, backend, folder, make_pdf):
+    """A copy read ahead of time is only used for exactly that version."""
+    target = draft(backend, "Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de")
+    sender.run_once(folder, dry_run=False)                             # reads ahead
+    backend.edit_draft_externally(target, ms.alternative_draft(
+        "Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de",
+        body_plain="Sehr geehrte Frau Neu, hiermit bewerbe ich mich bei Ihnen."))
+    make_pdf(TROMPETTER, age=30)
+    assert sender.run_once(folder, dry_run=False).kind == SENT
+    assert b"Frau Neu" in backend.sent[0]["raw"]
+
+
+def test_old_confirmation_is_checked_again(gmail, db, backend, folder, make_pdf):
+    from attachment_manager import AttachmentManager
+    from file_scanner import FileScanner
+    target = draft(backend, "Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de")
+    pdf = FileScanner(db, {"min_file_age_seconds": 0, "stability_check_seconds": 0}).check_single(
+        make_pdf(TROMPETTER, age=30))
+    manager = AttachmentManager(gmail, db)
+    plan = manager.prepare(pdf, "Trompetter", gmail.get_draft_info(target))
+    plan.confirmed_at = time.monotonic() - 30
+    backend.calls.clear()
+    assert manager.execute(plan, dry_run=False).status == "success"
+    assert gets(backend, "minimal")
+
+
+def test_reading_ahead_waits_between_reads_and_ignores_errors(sender, backend, folder, monkeypatch):
+    draft(backend, "Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de")
+    sender.run_once(folder, dry_run=False)
+    sender.run_once(folder, dry_run=False)
+    assert len(backend.method_calls("drafts.list")) == 1              # not again within 3 s
+
+    def broken(*_a, **_k):
+        raise OSError("offline")
+    monkeypatch.setattr(sender.gmail, "prefetch_recent", broken)
+    sender._last_prefetch = 0
+    assert sender.run_once(folder, dry_run=False).kind == IDLE
+
+
+def test_completely_saved_check_runs_once_per_pdf(sender, backend, folder, make_pdf, monkeypatch):
+    calls = []
+    original = sender.scanner._stability_problem
+    monkeypatch.setattr(sender.scanner, "_stability_problem", lambda p, st: calls.append(p) or original(p, st))
+    make_pdf(TROMPETTER, age=30)
+    for _ in range(3):
+        sender._next_try.clear()
+        assert sender.run_once(folder, dry_run=False).kind == WAITING     # no draft yet
+    assert len(calls) == 1
+
+
+def test_long_waiting_pdf_is_looked_at_less_often(sender, folder, make_pdf):
+    make_pdf(TROMPETTER, age=30)
+    assert sender.run_once(folder, dry_run=False).retry_in == 1.0
+    os.utime(folder / TROMPETTER, (time.time() - 600, time.time() - 600))
+    sender._next_try.clear()
+    assert sender.run_once(folder, dry_run=False).retry_in == 5.0
+
+
+# --------------------------------------------------------------------------
+# Batch mode: every new PDF into its own draft
+# --------------------------------------------------------------------------
+
+BARTH = "Amine_Haouam_Ausbildung_Elektroniker_Barth_und_Kerner_GmbH.pdf"
+SCHMIDT = "Amine_Haouam_Ausbildung_Elektroniker_Elektro_Schmidt.pdf"
+
+
+@pytest.fixture
+def batch_sender(sender):
+    sender.since = time.time() - 3600          # watching for an hour
+    return sender
+
+
+def test_batch_sends_every_new_pdf_oldest_first(batch_sender, backend, folder, make_pdf):
+    d_barth = draft(backend, "Bewerbung Barth und Kerner", "info@barth-kerner.de")
+    d_schmidt = draft(backend, "Bewerbung bei Elektro Schmidt", "info@elektro-schmidt.de")
+    d_trompetter = draft(backend, "Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de")
+    make_pdf(BARTH, age=50)
+    make_pdf(SCHMIDT, age=40)
+    make_pdf(TROMPETTER, age=30)
+    results = [batch_sender.run_once(folder, dry_run=False) for _ in range(3)]
+    assert [r.kind for r in results] == [SENT, SENT, SENT]
+    assert [r.details["more"] for r in results] == [True, True, False]
+    assert [s["draft_id"] for s in backend.sent] == [d_barth, d_schmidt, d_trompetter]
+    assert batch_sender.run_once(folder, dry_run=False).kind == IDLE
+
+
+def test_batch_waiting_pdf_does_not_hold_up_the_others(batch_sender, backend, folder, make_pdf):
+    target = draft(backend, "Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de")
+    make_pdf(BARTH, age=50)                                  # no draft yet
+    make_pdf(TROMPETTER, age=30)
+    first = batch_sender.run_once(folder, dry_run=False)
+    assert first.kind == SENT and first.pdf_name == TROMPETTER
+    assert [s["draft_id"] for s in backend.sent] == [target]
+    second = batch_sender.run_once(folder, dry_run=False)
+    assert second.kind == WAITING and second.pdf_name == BARTH
+
+
+def test_batch_latest_draft_rule_only_for_the_latest_pdf(batch_sender, backend, folder, make_pdf):
+    """An older PDF needs a clear match; 'mentioned in the latest draft' is
+    only enough for the latest PDF."""
+    draft(backend, "Bewerbung um einen Ausbildungsplatz", "info@tb-elektro.de",
+          body="Sehr geehrte Damen und Herren der Barth und Kerner GmbH, hiermit bewerbe ich mich.")
+    make_pdf(BARTH, age=50)
+    make_pdf(TROMPETTER, age=30)
+    result = batch_sender.run_once(folder, dry_run=False)
+    assert result.kind == WAITING and backend.sent == []
+    assert "1 more PDF" in result.message
+
+
+def test_latest_draft_of_another_waiting_pdf_is_not_taken(batch_sender, backend):
+    schmidt = draft(backend, "Bewerbung bei Elektro Schmidt", "info@elektro-schmidt.de",
+                    body="Sehr geehrte Damen und Herren, ich habe auch an Trompetter geschrieben.")
+    drafts = batch_sender.gmail.recent_drafts(15)
+    assert batch_sender.choose_draft("Trompetter", drafts)[0].draft_id == schmidt
+    pending = [(Path(SCHMIDT), None, "sha")]
+    reserved = batch_sender._reserved("Trompetter", pending, drafts)
+    assert reserved == {schmidt}
+    assert batch_sender.choose_draft("Trompetter", drafts, reserved=reserved)[0] is None
+
+
+def test_pdfs_from_before_watching_are_left_alone(sender, backend, folder, make_pdf):
+    draft(backend, "Bewerbung Barth und Kerner", "info@barth-kerner.de")
+    make_pdf(BARTH, age=3600)            # long before the app started
+    make_pdf(TROMPETTER, age=30)
+    assert sender.run_once(folder, dry_run=False).kind == WAITING
+    assert backend.sent == []
+
+
+def test_batch_off_only_the_latest_pdf(batch_sender, backend, folder, make_pdf, config):
+    config.data["auto_batch"] = False
+    draft(backend, "Bewerbung Barth und Kerner", "info@barth-kerner.de")
+    make_pdf(BARTH, age=50)
+    make_pdf(TROMPETTER, age=30)
+    result = batch_sender.run_once(folder, dry_run=False)
+    assert result.kind == WAITING and result.pdf_name == TROMPETTER and backend.sent == []
+
+
+def test_pdf_being_saved_is_looked_at_again_soon(sender, folder, make_pdf):
+    path = make_pdf(TROMPETTER, age=0)
+    sender.clock = lambda: file_time(os.stat(path)) + 0.05      # saved 50 ms ago
+    result = sender.run_once(folder, dry_run=False)
+    assert result.kind == WAITING and result.message == "still being saved"
+    assert abs(result.details["soon"] - 0.15) < 0.01             # min. age 0.2 s

@@ -81,7 +81,9 @@ def test_ignores_empty_files(scanner, folder, make_pdf):
 
 def test_ignores_files_still_being_written(scanner, folder, make_pdf):
     older = make_pdf("Amine_Haouam_Ausbildung_Elektroniker_A.pdf", age=900)
-    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_JustNow.pdf", age=0.5)
+    # Written this very moment (a time slightly ahead keeps the test
+    # independent of how fast it runs; the threshold is only 0.2 s).
+    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_JustNow.pdf", age=-1)
     result = scanner.scan(folder)
     assert result.selected.path == older
     assert any("may still be being written" in s.reason for s in result.skipped)

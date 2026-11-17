@@ -56,7 +56,7 @@ attachment to an existing draft after you confirm it.
 | Weak / uncertain matches never lead to an attachment | Partial names or similar spellings are shown for reference only. To use such a draft you must select it manually and confirm an extra warning. |
 | Keeps the draft's text, formatting and attachments | The complete original message is downloaded, one MIME part is added, and before uploading the new message is compared part-by-part with the original. Any difference aborts. After the upload the draft is read back and checked again. |
 | Detects duplicates | Every processed PDF is stored with its SHA-256 hash – renamed or moved copies are recognised. Before attaching, the draft is checked for the same file (by content and by name). |
-| Processes only one PDF per run | A scan selects exactly one PDF; there is no batch mode. |
+| One PDF per draft | A manual scan selects exactly one PDF. Automatic batch mode handles several new PDFs one after another, each only into the draft that clearly belongs to its company. |
 | Never modifies your local PDFs | Files are only read (to hash and attach them). |
 | Never asks for or stores your Gmail password | Sign-in uses Google's OAuth browser flow. The token is stored encrypted with Windows DPAPI. |
 | Dry-run mode | Shows exactly what would happen (including the full safety check) without changing Gmail or sending anything. It is **on by default** on first start and overrides automatic sending. |
@@ -324,21 +324,35 @@ Set this once in the main window (the settings are saved):
 * tick **Send e-mail automatically after attaching**,
 * untick **Dry-run mode**.
 
-From then on the app works on its own, every **2 seconds**:
+From then on the app works on its own and checks the folder **twice a
+second**:
 
-1. It looks at the **latest PDF** in the Bewerbungen folder (newest saved,
-   created or copied file – only that one).
-2. If it was not sent yet, it reads the company from the file name.
-3. It looks at your **most recent drafts** (fast – not the whole mailbox) and
-   picks the draft for that company: the one draft whose subject or
-   recipient clearly contains the company, otherwise **your latest draft**
-   if it mentions the company anywhere (subject, recipient or text).
+1. It looks at the **new PDFs** in the Bewerbungen folder (saved, created or
+   copied): with **Batch** ticked (default) every PDF saved since the app
+   started watching (plus up to 5 minutes before), oldest first; otherwise
+   only the latest PDF.
+2. For each PDF not sent yet it reads the company from the file name.
+3. It looks at your **most recent drafts** (fast – not the whole mailbox; the
+   app reads them ahead of time while nothing is waiting) and picks the draft
+   for that company: the one draft whose subject or recipient clearly
+   contains the company; for the latest PDF otherwise **your latest draft**
+   if it mentions the company anywhere (subject, recipient or text) and is
+   not clearly the draft of another waiting PDF.
 4. It attaches the PDF and **sends the e-mail**, and plays a short
-   **success chime**. The banner shows "Last sent: ...".
+   **success chime**. The banner shows "Last sent: ...". In batch mode the
+   next PDF follows right away; a PDF that cannot be sent yet does not hold
+   up the others.
+
+**Speed:** about one second from saving the PDF to the sent e-mail. A PDF
+counts as completely saved as soon as it ends with the PDF end marker, keeps
+its size during a short re-check and is no longer open in another program.
+Gmail is asked only what is necessary: the current versions of your recent
+drafts, the upload, reading the draft back (the PDF must be in it) and the
+send. All safety checks of the manual mode stay.
 
 It never opens a dialog in this mode. If something does not fit yet, the
-banner says why and the app simply looks again (every 3 seconds), for
-example:
+banner says why and the app simply looks again (every second; PDFs waiting
+for several minutes less often), for example:
 
 * "no recent draft mentions 'Trompetter' yet" – write the draft; it is sent
   as soon as it exists,

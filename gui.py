@@ -821,6 +821,13 @@ class App(tk.Tk):
             auto_row, text="Send e-mail automatically after attaching (only for one clear match)",
             variable=self.auto_send_var, style="Card.TCheckbutton", command=self._on_auto_send_toggled)
         self.auto_send_check.pack(side="right")
+        batch_row = ttk.Frame(setup, style="Card.TFrame")
+        batch_row.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        self.auto_batch_var = tk.BooleanVar(value=bool(self.config_obj.data.get("auto_batch", True)))
+        self.auto_batch_check = ttk.Checkbutton(
+            batch_row, text="Batch: handle EVERY new PDF, each into its own draft (not only the latest PDF)",
+            variable=self.auto_batch_var, style="Card.TCheckbutton", command=self._on_auto_batch_toggled)
+        self.auto_batch_check.pack(side="left")
 
         # 2. PDF card
         pdf_card = self._card(tab, "2  Application PDF")
@@ -1120,13 +1127,20 @@ class App(tk.Tk):
         self._show_watch_status()
         log.info("Automatic checking %s", "enabled" if self.config_obj.auto_check else "disabled")
 
+    def _on_auto_batch_toggled(self) -> None:
+        self.config_obj.data["auto_batch"] = bool(self.auto_batch_var.get())
+        self._save_config()
+        self._watch_text = ""
+        self._show_watch_status()
+        log.info("Batch mode %s", "enabled" if self.config_obj.data["auto_batch"] else "disabled")
+
     def _on_auto_send_toggled(self) -> None:
         if self.auto_send_var.get() and not self.ask_yes_no(
                 "Enable automatic sending?\n\n"
-                "From now on the app works on its own: it watches the LATEST PDF in the folder, finds "
-                "the draft for that company (your latest draft, if it mentions the company) and "
-                "SENDS the e-mail with the PDF attached - no dialog, no click. A chime plays when "
-                "it was sent.\n\n"
+                "From now on the app works on its own: it watches the folder (every new PDF in batch "
+                "mode, otherwise the LATEST PDF), finds the draft for that company (for the latest "
+                "PDF also your latest draft, if it mentions the company) and SENDS the e-mail with "
+                "the PDF attached - no dialog, no click. A chime plays when it was sent.\n\n"
                 "A draft is only sent when it has a recipient, a subject and text. A sent "
                 "e-mail cannot be recalled. While dry-run mode is on, nothing is sent.", title="Automatic sending", warning=True):
             self.auto_send_var.set(False)
@@ -1709,18 +1723,22 @@ class App(tk.Tk):
     # Automatic checking / sending
     # ------------------------------------------------------------------
     def _auto_tick(self) -> None:
-        """Runs every few seconds while automatic checking is on."""
+        """Runs twice a second while automatic checking is on."""
         try:
-            if (self.auto_check_var.get() and not self.busy and not self._auto_running
-                    and self._modal_depth == 0 and self.gmail is not None and self.current_pdf is None):
-                folder = Path(self.folder_var.get())
-                if folder.is_dir():
-                    if self.send_enabled:
-                        self._auto_run(folder)
-                    else:
-                        self._auto_offer(folder)
+            self._auto_now()
         finally:
             self.after(self.config_obj.watch_interval_ms, self._auto_tick)
+
+    def _auto_now(self) -> None:
+        """One automatic check, if nothing else is going on."""
+        if (self.auto_check_var.get() and not self.busy and not self._auto_running
+                and self._modal_depth == 0 and self.gmail is not None and self.current_pdf is None):
+            folder = Path(self.folder_var.get())
+            if folder.is_dir():
+                if self.send_enabled:
+                    self._auto_run(folder)
+                else:
+                    self._auto_offer(folder)
 
     def _get_auto_sender(self) -> AutoSender:
         if self._auto_sender is None or self._auto_sender.gmail is not self.gmail:
@@ -1789,6 +1807,13 @@ class App(tk.Tk):
         elif result.kind == AUTH:
             self._set_gmail_state("expired")
         self._show_watch_status(result)
+        if result.details.get("more") and result.kind in (SENT, DRY_RUN, PROBLEM):
+            self.after(10, self._auto_now)     # batch: the next PDF right away
+        elif result.kind == WAITING and result.details.get("soon"):
+            # A PDF is just being saved: look again the moment it is old enough.
+            delay = int(result.details["soon"] * 1000) + 20
+            if delay < self.config_obj.watch_interval_ms:
+                self.after(delay, self._auto_now)
 
     def _show_watch_status(self, result: AutoResult | None = None) -> None:
         if self.current_pdf is not None or not self.auto_check_var.get():
@@ -1796,9 +1821,13 @@ class App(tk.Tk):
         if result is not None:
             self._auto_last = result
         result = self._auto_last
-        interval = self.config_obj.watch_interval_ms // 1000
-        mode = ("the latest PDF is attached and SENT automatically when it fits a draft"
-                if self.send_enabled else "a new latest PDF is shown here for you to confirm")
+        interval = f"{self.config_obj.watch_interval_ms / 1000:g}"
+        if not self.send_enabled:
+            mode = "a new latest PDF is shown here for you to confirm"
+        elif self.config_obj.data.get("auto_batch", True):
+            mode = "every new PDF is attached and SENT automatically when it fits its draft"
+        else:
+            mode = "the latest PDF is attached and SENT automatically when it fits a draft"
         if self.dry_run_active and self.send_enabled:
             mode += " (DRY-RUN: nothing is really sent)"
         lines = [f"Watching the folder every {interval} s - {mode}."]

@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 
 APP_NAME = "Bewerbung Attach Assistant"
 APP_ID = "BewerbungAttachAssistant"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 # The only OAuth scope the application requests.
 #
@@ -178,7 +178,7 @@ DEFAULT_GENERIC_EMAIL_DOMAINS = [
 
 # Bumped when default timings change; older config.json files get the new
 # timing defaults (see Config.load).
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 
 DEFAULTS: dict[str, Any] = {
     "config_version": CONFIG_VERSION,
@@ -188,27 +188,38 @@ DEFAULTS: dict[str, Any] = {
     # the first run is always safe; switch it off in the main window.
     "dry_run": True,
     # Automatic mode: watch the folder (every watch_interval_seconds while
-    # Gmail is connected) and react to the latest PDF without clicking Scan.
+    # Gmail is connected) and react to new PDFs without clicking Scan.
     "auto_check": True,
-    "watch_interval_seconds": 2.0,
+    "watch_interval_seconds": 0.5,
     # Fully automatic: attach AND send when the latest PDF fits a draft (see
     # auto_sender.py).  Also makes confirmed manual attachments send.
     "auto_send": False,
     # Optional: seconds a draft must stay unchanged before it is sent
     # automatically.  0 = send immediately when a match is found.
     "draft_settle_seconds": 0.0,
-    # Look again after this many seconds when the draft is not ready yet.
-    "auto_retry_seconds": 3.0,
+    # Look again after this many seconds when the draft is not ready yet
+    # (PDFs waiting for minutes are looked at less often).
+    "auto_retry_seconds": 1.0,
     # Number of most recent drafts that are checked in automatic mode.
     "auto_recent_drafts": 15,
+    # Batch mode: every new PDF is handled (each into its own draft), not
+    # only the latest one.  PDFs saved up to auto_batch_lookback_minutes
+    # before the app started count as new.
+    "auto_batch": True,
+    "auto_batch_lookback_minutes": 5,
+    # While nothing is waiting, read the recent drafts ahead of time every
+    # few seconds so a new PDF is attached and sent without delay.
+    "auto_prefetch_seconds": 3.0,
     # Play a chime when an e-mail was sent.
     "play_sound": True,
     "scanner": {
         # Files modified more recently than this are treated as "still being
-        # written" and skipped.
-        "min_file_age_seconds": 1.0,
+        # written" and skipped.  (A PDF also has to end with %%EOF, keep its
+        # size during the re-check and - on Windows - not be open for writing
+        # in another program, so this can be short.)
+        "min_file_age_seconds": 0.2,
         # Size/mtime are sampled twice with this delay to detect ongoing writes.
-        "stability_check_seconds": 0.3,
+        "stability_check_seconds": 0.1,
         # Require the PDF to start with %PDF- and end with %%EOF (detects
         # truncated/incomplete copies and downloads).
         "require_complete_pdf": True,
@@ -309,8 +320,8 @@ class Config:
                 log.warning("Could not read config.json (%s) - using defaults", exc)
         version = overrides.get("config_version", 1)
         if not isinstance(version, int) or version < CONFIG_VERSION:
-            # Version 2 made automatic sending immediate: drop the old, slower
-            # timing values so the new defaults apply.
+            # Version 2 made automatic sending immediate, version 3 faster:
+            # drop the old, slower timing values so the new defaults apply.
             for key in ("draft_settle_seconds", "auto_retry_seconds", "watch_interval_seconds",
                         "auto_check_interval_seconds", "auto_watch_since", "auto_retry_minutes"):
                 overrides.pop(key, None)
@@ -364,7 +375,7 @@ class Config:
 
     @property
     def watch_interval_ms(self) -> int:
-        return int(max(1.0, float(self.data.get("watch_interval_seconds", 2.0))) * 1000)
+        return int(max(0.25, float(self.data.get("watch_interval_seconds", 0.5))) * 1000)
 
     @property
     def scanner(self) -> dict[str, Any]:

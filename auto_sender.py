@@ -1,26 +1,32 @@
 """
 auto_sender.py - Fully automatic mode ("watch the folder, send when it fits").
 
-Every few seconds AutoSender.run_once():
+Twice a second AutoSender.run_once():
 
-1. looks at the LATEST PDF in the Bewerbungen folder (newest of modified /
-   created time, so copied files count as new) - only that one file;
-2. skips it if it was already processed (SHA-256, cached - no re-hashing);
+1. looks at the new PDFs in the Bewerbungen folder (newest of modified /
+   created time, so copied files count as new): the LATEST PDF, and in batch
+   mode every PDF saved since watching started - oldest first;
+2. skips PDFs already processed (SHA-256, cached - no re-hashing);
 3. reads the company from the file name;
-4. reads only your most recent drafts (fast) and picks the draft:
+4. reads only your most recent drafts (fast; read ahead of time while
+   nothing is waiting) and picks the draft:
      * exactly one recent draft clearly matches (company in subject,
        recipient name or recipient domain)          -> that draft
-     * otherwise your LATEST draft, if it mentions the company anywhere
-       (subject, recipient or text)                  -> the latest draft
+     * for the latest PDF only: your LATEST draft, if it mentions the company
+       anywhere (subject, recipient or text) and is not clearly the draft of
+       another waiting PDF                           -> the latest draft
      * otherwise                                     -> wait and look again;
 5. checks the draft has a recipient, a subject and some text (instant
    checks; optionally also `draft_settle_seconds` without changes, default 0
    = no waiting);
-6. immediately attaches the PDF (same safe procedure as the manual mode, including the
-   byte-by-byte preservation check) and SENDS the e-mail.
+6. immediately attaches the PDF (same safe procedure as the manual mode,
+   including the byte-by-byte preservation check and reading the draft back)
+   and SENDS the e-mail.  One e-mail per call; when more PDFs are waiting the
+   result says so and the GUI calls again at once.
 
-Nothing here ever opens a dialog; run_once returns an AutoResult that the
-GUI shows in the banner (and plays a sound for a sent e-mail).
+A PDF that cannot be sent yet never holds up the others.  Nothing here ever
+opens a dialog; run_once returns an AutoResult that the GUI shows in the
+banner (and plays a sound for a sent e-mail).
 """
 
 from __future__ import annotations
@@ -95,7 +101,12 @@ class AutoSender:
         self.parser = FilenameParser(settings["filename_parser"])
         self.engine = MatchingEngine(settings["matching"].get("generic_email_domains", []))
         self.manager = AttachmentManager(gmail, db)
+        # Batch mode: PDFs that appeared after this moment count as new.
+        lookback = max(0.0, float(settings.get("auto_batch_lookback_minutes", 5))) * 60
+        self.since = clock() - lookback
+        self._last_prefetch = 0.0
         self._hash_cache: dict[tuple[str, int, int], str] = {}
+        self._stable: set[str] = set()          # sha256 of PDFs found completely saved
         self._next_try: dict[str, float] = {}   # sha256 -> time of next attempt
         self._last: dict[str, AutoResult] = {}  # sha256 -> last waiting result
 
@@ -112,10 +123,18 @@ class AutoSender:
     def recent_count(self) -> int:
         return max(1, int(self.settings.get("auto_recent_drafts", 15)))
 
+    @property
+    def batch(self) -> bool:
+        return bool(self.settings.get("auto_batch", True))
+
+    @property
+    def prefetch_seconds(self) -> float:
+        return float(self.settings.get("auto_prefetch_seconds", 3.0))
+
     # -- helpers -------------------------------------------------------------
-    def latest_pdf(self, folder: Path) -> tuple[Path, os.stat_result] | None:
-        """The single most recently saved/changed PDF in the folder."""
-        best: tuple[float, Path, os.stat_result] | None = None
+    def _pdfs(self, folder: Path) -> list[tuple[float, str, Path, os.stat_result]]:
+        """All PDFs of the folder (temporary files left out), oldest first."""
+        found = []
         try:
             with os.scandir(folder) as entries:
                 for entry in entries:
@@ -127,13 +146,48 @@ class AutoSender:
                         continue
                     if self.scanner._temp_reason(entry.name, st):
                         continue
-                    key = file_time(st)
-                    if best is None or (key, entry.name) > (best[0], best[1].name):
-                        best = (key, Path(entry.path), st)
+                    found.append((file_time(st), entry.name, Path(entry.path), st))
         except OSError as exc:
             log.warning("Cannot read folder %s: %s", folder, exc)
-            return None
-        return (best[1], best[2]) if best else None
+            return []
+        found.sort(key=lambda item: (item[0], item[1]))
+        return found
+
+    def latest_pdf(self, folder: Path) -> tuple[Path, os.stat_result] | None:
+        """The single most recently saved/changed PDF in the folder."""
+        pdfs = self._pdfs(folder)
+        return (pdfs[-1][2], pdfs[-1][3]) if pdfs else None
+
+    def candidate_pdfs(self, folder: Path) -> list[tuple[Path, os.stat_result]]:
+        """The PDFs to look at, oldest first; the latest PDF is always last.
+        Batch mode: every PDF saved since watching started; otherwise only
+        the latest PDF."""
+        pdfs = self._pdfs(folder)
+        if not pdfs:
+            return []
+        chosen = [p for p in pdfs[:-1] if p[0] >= self.since] if self.batch else []
+        return [(path, st) for _t, _n, path, st in chosen + [pdfs[-1]]]
+
+    def _patience(self, st: os.stat_result) -> float:
+        """Retry interval while waiting for a draft: quick at first, less
+        often for PDFs that have been waiting for a while."""
+        age = self.clock() - file_time(st)
+        if age < 120:
+            return self.retry_seconds
+        return max(self.retry_seconds, 5.0 if age < 1800 else 30.0)
+
+    def _maybe_prefetch(self) -> None:
+        """While nothing is waiting: read the recent drafts ahead of time."""
+        if self.prefetch_seconds <= 0 or self.clock() - self._last_prefetch < self.prefetch_seconds:
+            return
+        self._last_prefetch = self.clock()
+        prefetch = getattr(self.gmail, "prefetch_recent", None)
+        if prefetch is None:
+            return
+        try:
+            prefetch(self.recent_count)
+        except Exception as exc:   # only a speed-up - never an error
+            log.debug("Reading drafts ahead of time failed: %s", exc)
 
     def _sha(self, path: Path, st: os.stat_result) -> str:
         key = (str(path), st.st_size, st.st_mtime_ns)
@@ -156,23 +210,28 @@ class AutoSender:
         self._last[sha] = result
         return result
 
-    def choose_draft(self, company: str, drafts: list[DraftInfo]) -> tuple[DraftInfo | None, str]:
+    def choose_draft(self, company: str, drafts: list[DraftInfo], *, allow_latest: bool = True,
+                     reserved: set[str] | frozenset[str] = frozenset()) -> tuple[DraftInfo | None, str]:
         """Pick the draft for *company* from the recent drafts (newest first).
-        Returns (draft, reason) - draft is None when nothing fits yet."""
+        Returns (draft, reason) - draft is None when nothing fits yet.
+
+        allow_latest: the latest draft may be used when it merely mentions
+        the company (only for the latest PDF).  reserved: drafts that clearly
+        belong to another waiting PDF - never used through that rule."""
         if not drafts:
             return None, "no drafts in Gmail yet"
         outcome = self.engine.match(company, drafts)
         by_id = {m.draft.draft_id: m for m in outcome.all_matches}
         latest = drafts[0]
-        latest_match = by_id.get(latest.draft_id)
+        latest_match = by_id.get(latest.draft_id) if latest.draft_id not in reserved else None
         strong = [m for m in outcome.all_matches if m.strength == STRONG]
         if len(strong) == 1:
             return strong[0].draft, "company found in " + strong[0].evidence_summary()
         if len(strong) > 1:
-            if latest_match is not None and latest_match.strength == STRONG:
+            if allow_latest and latest_match is not None and latest_match.strength == STRONG:
                 return latest, "latest draft, company found in " + latest_match.evidence_summary()
             return None, f"{len(strong)} recent drafts are for '{company}' - delete the extra one"
-        if latest_match is not None and latest_match.strength == POSSIBLE:
+        if allow_latest and latest_match is not None and latest_match.strength == POSSIBLE:
             return latest, "latest draft, company found in " + latest_match.evidence_summary()
         return None, f"no recent draft mentions '{company}' yet"
 
@@ -192,25 +251,90 @@ class AutoSender:
 
     # -- main step ---------------------------------------------------------
     def run_once(self, folder: Path, *, dry_run: bool) -> AutoResult:
-        latest = self.latest_pdf(folder)
-        if latest is None:
+        """Look at the new PDFs and send at most one e-mail."""
+        candidates = self.candidate_pdfs(folder)
+        if not candidates:
+            self._maybe_prefetch()
             return AutoResult(IDLE, "No PDF in the folder yet.")
-        path, st = latest
-        try:
-            sha = self._sha(path, st)
-        except OSError:
-            return AutoResult(WAITING, "still being saved", path.name, retry_in=2)
-        if self.db.find_blocking_record(sha) is not None:
-            return AutoResult(IDLE, f"Latest PDF already processed: {path.name}", path.name)
-        if self.clock() < self._next_try.get(sha, 0.0):
-            return self._last.get(sha) or AutoResult(WAITING, "waiting", path.name)
+        latest_path = candidates[-1][0]
+        pending: list[tuple[Path, os.stat_result, str | None]] = []
+        for path, st in candidates:
+            try:
+                sha = self._sha(path, st)
+            except OSError:
+                pending.append((path, st, None))      # still being saved
+                continue
+            if self.db.find_blocking_record(sha) is None:
+                pending.append((path, st, sha))
+        if not pending:
+            self._maybe_prefetch()
+            return AutoResult(IDLE, f"Latest PDF already processed: {latest_path.name}", latest_path.name)
 
+        state: dict[str, Any] = {}     # draft list of this call (read once, when needed)
+        waiting: list[AutoResult] = []
+        for path, st, sha in pending:
+            if sha is None:
+                waiting.append(AutoResult(WAITING, "still being saved", path.name, retry_in=0.5))
+                continue
+            if self.clock() < self._next_try.get(sha, 0.0):
+                waiting.append(self._last.get(sha) or AutoResult(WAITING, "waiting", path.name))
+                continue
+            result = self._handle(path, st, sha, is_latest=path == latest_path, pending=pending,
+                                  state=state, dry_run=dry_run)
+            if result.kind == WAITING:
+                waiting.append(result)
+                continue
+            result.details["more"] = len(pending) > 1
+            return result
+        return self._summary(waiting, latest_path.name)
+
+    def _summary(self, waiting: list[AutoResult], latest_name: str) -> AutoResult:
+        """One result for the banner: the latest PDF's, and how many wait.
+        details["soon"]: a PDF is just being saved - look again after that
+        many seconds instead of at the next regular check."""
+        main = next((r for r in waiting if r.pdf_name == latest_name), waiting[0])
+        soon = [r.details["soon"] for r in waiting if "soon" in r.details]
+        if len(waiting) == 1:
+            return main
+        result = AutoResult(main.kind, f"{main.message} (+{len(waiting) - 1} more PDF(s) waiting)",
+                            main.pdf_name, main.draft_subject, min(r.retry_in for r in waiting))
+        result.details["waiting"] = len(waiting)
+        if soon:
+            result.details["soon"] = min(soon)
+        return result
+
+    def _company(self, path: Path) -> str | None:
+        parsed = self.parser.parse(path.name)
+        return parsed.company if parsed.ok else None
+
+    def _reserved(self, company: str, pending: list, drafts: list[DraftInfo]) -> set[str]:
+        """Drafts that clearly belong to another waiting PDF's company."""
+        reserved: set[str] = set()
+        for path, _st, sha in pending:
+            other = self._company(path) if sha else None
+            if not other or other == company:
+                continue
+            for match in self.engine.match(other, drafts).all_matches:
+                if match.strength == STRONG:
+                    reserved.add(match.draft.draft_id)
+        return reserved
+
+    def _handle(self, path: Path, st: os.stat_result, sha: str, *, is_latest: bool, pending: list,
+                state: dict[str, Any], dry_run: bool) -> AutoResult:
+        """Try one PDF: wait, or attach and send it."""
         # The file must be completely written.
-        if self.clock() - file_time(st) < self.scanner.min_age:
-            return AutoResult(WAITING, "still being saved", path.name, retry_in=2)
-        problem = self.scanner._stability_problem(path, st)
-        if problem:
-            return self._wait(sha, path.name, problem, retry_in=3)
+        age = self.clock() - file_time(st)
+        if age < self.scanner.min_age:
+            remaining = max(0.05, self.scanner.min_age - age)
+            return AutoResult(WAITING, "still being saved", path.name, retry_in=remaining,
+                              details={"soon": remaining})
+        if sha not in self._stable:
+            problem = self.scanner._stability_problem(path, st)
+            if problem:
+                return self._wait(sha, path.name, problem, retry_in=0.5)
+            if len(self._stable) > 500:
+                self._stable.clear()
+            self._stable.add(sha)
         pdf = PdfFile(path=path, size=st.st_size, mtime=st.st_mtime, sha256=sha)
 
         parsed = self.parser.parse(path.name)
@@ -220,15 +344,22 @@ class AutoSender:
         company = parsed.company
 
         try:
-            drafts = self.gmail.recent_drafts(self.recent_count)
-            draft, reason = self.choose_draft(company, drafts)
+            if "drafts" not in state:
+                # Gmail confirms the drafts' current versions as of now.
+                state["listed_at"] = time.monotonic()
+                count = max(self.recent_count, min(100, len(pending) + 10)) if self.batch else self.recent_count
+                state["drafts"] = self.gmail.recent_drafts(count)
+            drafts = state["drafts"]
+            reserved = self._reserved(company, pending, drafts) if len(pending) > 1 else set()
+            draft, reason = self.choose_draft(company, drafts, allow_latest=is_latest, reserved=reserved)
             if draft is None:
-                return self._wait(sha, path.name, reason)
+                return self._wait(sha, path.name, reason, retry_in=self._patience(st))
             not_ready = self.draft_not_ready(draft)
             if not_ready:
-                return self._wait(sha, path.name, not_ready, retry_in=min(self.retry_seconds, 10),
+                return self._wait(sha, path.name, not_ready, retry_in=min(self._patience(st), 10),
                                   draft_subject=draft.subject)
             plan = self.manager.prepare(pdf, company, draft)
+            plan.confirmed_at = state["listed_at"]
         except GmailAuthError as exc:
             return AutoResult(AUTH, str(exc), path.name, retry_in=30)
         except DuplicateAttachmentError as exc:

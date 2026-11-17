@@ -42,6 +42,7 @@ import email.policy
 import hashlib
 import io
 import logging
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from email.generator import BytesGenerator
@@ -77,6 +78,11 @@ from gmail_client import (
 )
 
 log = logging.getLogger(__name__)
+
+# A draft version Gmail confirmed less than this many seconds ago is not asked
+# for again right before the update (automatic mode reads the draft list
+# immediately before attaching).
+FRESH_CONFIRMATION_SECONDS = 2.0
 
 # Policy used to parse and re-generate drafts:
 #  * refold_source="none": original header lines are written back verbatim
@@ -281,6 +287,9 @@ class AttachPlan:
     existing_attachments: list[AttachmentInfo]
     new_raw: bytes
     warnings: list[str] = field(default_factory=list)
+    # time.monotonic() when Gmail last confirmed that the draft is still
+    # exactly this version (automatic mode: the draft list read just before).
+    confirmed_at: float | None = None
 
     @property
     def new_size(self) -> int:
@@ -320,7 +329,7 @@ class AttachmentManager:
         pdf_bytes = self._read_pdf(pdf)
 
         try:
-            original = self.gmail.get_draft_raw(draft.draft_id)
+            original = self.gmail.get_draft_raw(draft.draft_id, message_id=draft.message_id)
         except DraftNotFoundError as exc:
             raise AttachError(str(exc)) from exc
         if original.message_id != draft.message_id:
@@ -456,10 +465,14 @@ class AttachmentManager:
     def _attach(self, plan: AttachPlan) -> AttachResult:
         """Attach the PDF to the draft (no sending)."""
 
-        # Pre-flight checks immediately before writing.
+        # Pre-flight checks immediately before writing.  The draft's current
+        # version is asked from Gmail unless Gmail confirmed it a moment ago.
         try:
             self._read_pdf(plan.pdf)
-            current_id = self.gmail.get_draft_message_id(plan.draft.draft_id)
+            fresh = (plan.confirmed_at is not None
+                     and time.monotonic() - plan.confirmed_at <= FRESH_CONFIRMATION_SECONDS)
+            current_id = (plan.original.message_id if fresh
+                          else self.gmail.get_draft_message_id(plan.draft.draft_id))
             if current_id != plan.original.message_id:
                 raise DraftChangedError(
                     "The draft was changed in Gmail after the preview. Nothing was changed - "

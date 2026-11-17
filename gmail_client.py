@@ -32,6 +32,7 @@ import logging
 import shutil
 import socket
 import ssl
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.header import decode_header, make_header
@@ -59,6 +60,9 @@ log = logging.getLogger(__name__)
 NUM_RETRIES = 3
 # Media uploads above this size use a resumable upload.
 RESUMABLE_THRESHOLD = 5 * 1024 * 1024
+# Complete drafts kept in memory (automatic mode reads them ahead of time).
+RAW_CACHE_ENTRIES = 8
+RAW_CACHE_MAX_BYTES = 5 * 1024 * 1024
 
 
 # --------------------------------------------------------------------------
@@ -669,6 +673,8 @@ class GmailClient:
         # message id whenever a draft is edited, so cached entries never
         # become stale - an edited draft simply has a new id.
         self._cache: dict[str, DraftInfo] = {}
+        # Complete messages of recent drafts, also keyed by message id.
+        self._raw_cache: "OrderedDict[str, RawDraft]" = OrderedDict()
 
     # -- construction -----------------------------------------------------
     @classmethod
@@ -824,8 +830,18 @@ class GmailClient:
         )
         return (response.get("message", {}) or {}).get("id", "")
 
-    def get_draft_raw(self, draft_id: str) -> RawDraft:
-        """The complete RFC 822 message of a draft, including attachments."""
+    def get_draft_raw(self, draft_id: str, message_id: str | None = None) -> RawDraft:
+        """The complete RFC 822 message of a draft, including attachments.
+
+        With *message_id* (the draft's current message id, e.g. from a draft
+        list just read) a copy read ahead of time is used when it is exactly
+        that version - an edited draft has a new message id, so a cached copy
+        can never be outdated."""
+        if message_id:
+            cached = self._raw_cache.get(message_id)
+            if cached is not None and cached.draft_id == draft_id:
+                self._raw_cache.move_to_end(message_id)
+                return cached
         response = self._execute(
             self._service.users().drafts().get(userId="me", id=draft_id, format="raw"),
             "read draft content",
@@ -838,7 +854,29 @@ class GmailClient:
             raw = _b64url_decode(raw_b64)
         except (binascii.Error, ValueError) as exc:
             raise GmailApiError(f"Gmail returned undecodable draft content: {exc}") from exc
-        return RawDraft(response.get("id", draft_id), message.get("id", ""), message.get("threadId"), raw)
+        result = RawDraft(response.get("id", draft_id), message.get("id", ""), message.get("threadId"), raw)
+        if result.message_id and len(raw) <= RAW_CACHE_MAX_BYTES:
+            self._raw_cache[result.message_id] = result
+            self._raw_cache.move_to_end(result.message_id)
+            while len(self._raw_cache) > RAW_CACHE_ENTRIES:
+                self._raw_cache.popitem(last=False)
+        return result
+
+    def prefetch_recent(self, count: int = 15, raw_count: int = 3) -> None:
+        """Read the recent drafts ahead of time (automatic mode, while nothing
+        is waiting), so that a new PDF can be attached without waiting for
+        Gmail: the draft list, the drafts' contents, and the complete message
+        of the newest few drafts.  Read-only."""
+        infos = self.recent_drafts(count)
+        for info in infos[:raw_count]:
+            if info.message_id in self._raw_cache:
+                continue
+            if sum(a.size for a in info.attachments) > RAW_CACHE_MAX_BYTES // 2:
+                continue
+            try:
+                self.get_draft_raw(info.draft_id)
+            except DraftNotFoundError:
+                continue
 
     def update_draft_raw(self, draft_id: str, thread_id: str | None, raw: bytes) -> dict[str, Any]:
         """Replace the content of the EXISTING draft *draft_id* with *raw*.

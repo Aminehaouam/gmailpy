@@ -450,3 +450,35 @@ def test_manual_confirm_with_send_enabled_sends(make_app, backend, make_pdf):
     app.confirm_and_attach()
     app.wait_until_idle()
     assert len(backend.sent) == 1 and len(script.confirms) == 1
+
+
+def test_batch_sends_every_new_pdf_one_after_another(make_app, backend, make_pdf, chimes):
+    import time
+    barth = backend.add_draft(ms.alternative_draft("Bewerbung Barth und Kerner", "info@barth-kerner.de"))
+    trompetter = backend.add_draft(ms.alternative_draft("Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de"))
+    app, script = make_app()
+    enable_auto(app, send=True, live=True)
+    connect(app)
+    app._get_auto_sender().since = time.time() - 3600
+    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Barth_und_Kerner_GmbH.pdf", age=40)
+    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=30)
+    auto_tick(app)                                       # the first one ...
+    deadline = time.time() + 5
+    while len(backend.sent) < 2 and time.time() < deadline:
+        app.update()                                     # ... and the next one right away
+        app.wait_until_idle()
+        time.sleep(0.01)
+    assert [s["draft_id"] for s in backend.sent] == [barth, trompetter]
+    assert chimes == [True, True]
+    assert "every new PDF" in app.banner.cget("text")
+    assert script.infos == script.warnings == script.errors == []
+
+
+def test_batch_mode_can_be_switched_off(make_app, config):
+    app, _script = make_app()
+    assert app.auto_batch_var.get() is True
+    app.auto_batch_var.set(False)
+    app._on_auto_batch_toggled()
+    assert config.data["auto_batch"] is False
+    from config import Config
+    assert Config.load(config.paths).data["auto_batch"] is False
