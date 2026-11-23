@@ -193,3 +193,36 @@ def test_company_with_only_legal_form_is_rejected(engine):
 def test_normalize_text():
     assert normalize_text("  Barth   &  Kerner, GmbH!") == "barth kerner gmbh"
     assert normalize_text("Müller e.K.") == "mueller ek"
+
+
+# -- the application sentence "bei <Firma> bewerben" -------------------------
+
+def _draft_with_body(body, subject="Bewerbung um einen Ausbildungsplatz zum Hotelfachmann (m/w/d)",
+                     to="info@alte-muehle-hotel.com"):
+    from types import SimpleNamespace
+    return SimpleNamespace(draft_id="d1", subject=subject, recipients=[("to", "", to)], body_text=body)
+
+
+@pytest.mark.parametrize("company, body", [
+    ("Knorr", "gerne möchte ich mich um einen Ausbildungsplatz zum Hotelfachmann (m/w/d) bei Knorr bewerben."),
+    ("Knorr", "Hiermit möchte ich mich bei Knorr in Bremen um einen Ausbildungsplatz bewerben."),
+    ("Barth und Kerner GmbH", "gerne möchte ich mich bei der Barth & Kerner GmbH bewerben."),
+    ("Mueller", "gerne möchte ich mich bei Müller bewerben."),
+    ("EnergyAutark", "um einen Ausbildungsplatz zum Elektroniker (m/w/d) bei EnergyAutark bewerben."),
+])
+def test_application_sentence_is_strong(company, body):
+    from matching_engine import _CompanyPattern
+    match = MatchingEngine().score_draft(_CompanyPattern(company), _draft_with_body(body))
+    assert match.strength == STRONG, match.evidence_summary()
+    assert any(e.field == "application sentence" for e in match.evidence)
+
+
+@pytest.mark.parametrize("company, body", [
+    ("Knorr", "Ich habe früher bei Knorr gearbeitet. Ich interessiere mich für den Beruf."),   # no "bewerben"
+    ("Knorr", "gerne möchte ich mich bei Knorrbremse bewerben."),                              # other word
+    ("Knorr", "gerne möchte ich mich bei Hotel Linde bewerben, Knorr kenne ich."),             # other company
+])
+def test_other_mentions_are_not_strong(company, body):
+    from matching_engine import _CompanyPattern
+    match = MatchingEngine().score_draft(_CompanyPattern(company), _draft_with_body(body))
+    assert match.strength != STRONG, match.evidence_summary()

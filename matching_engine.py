@@ -53,6 +53,12 @@ LEGAL_FORM_TOKENS = frozenset({
 # Connector words; "Barth & Kerner" == "Barth und Kerner" == "Barth and Kerner".
 CONNECTOR_TOKENS = frozenset({"und", "and", "u"})
 
+# Application sentence: "bei [der] <Firma> bewerben".
+_ARTICLES = frozenset({"der", "dem", "den", "die", "das"})
+_APPLY_WORDS = frozenset({"bewerben", "bewerbe", "bewerbung"})
+_CLAUSE_BREAK_RE = re.compile(r"[,.;:!?\n()]+")
+_CLAUSE_END_TOKENS = frozenset({"0clausebreak0", "und", "oder", "aber", "sondern"})
+
 _TRANSLIT = str.maketrans({
     "ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss", "æ": "ae", "ø": "oe", "œ": "oe",
 })
@@ -156,7 +162,8 @@ STRENGTH_LABELS = {
 class Evidence:
     """One reason why a draft might belong to the company."""
 
-    field: str        # "subject", "recipient name", "recipient domain", "recipient address", "body"
+    field: str        # "subject", "recipient name", "recipient domain", "recipient address",
+                      # "application sentence", "body"
     level: str        # STRONG / POSSIBLE / WEAK
     detail: str       # human readable explanation
 
@@ -331,6 +338,10 @@ class MatchingEngine:
                 self._check_text_field(pattern, "recipient address", local, POSSIBLE, evidence,
                                        label=address, allow_weak=False)
 
+        # The sentence of the application that names the company:
+        # "... um einen Ausbildungsplatz ... bei <Firma> bewerben."
+        self._check_application_sentence(pattern, draft.body_text, evidence)
+
         # Body text (plain text + text extracted from HTML)
         self._check_text_field(pattern, "body", draft.body_text, POSSIBLE, evidence)
 
@@ -349,6 +360,47 @@ class MatchingEngine:
         else:
             result.strength = NONE
         return result
+
+    @staticmethod
+    def _check_application_sentence(pattern: _CompanyPattern, text: str, evidence: list[Evidence]) -> None:
+        """Strong evidence: the draft says it applies AT this company -
+        "bei <company> bewerben" (also "bei der <company> in <Ort> um einen
+        Ausbildungsplatz bewerben").  "bewerben" must follow in the same part
+        of the sentence (no comma, full stop, "und", "oder", "aber" between).
+        The application texts name the company exactly like this, with the
+        same word as the PDF file name, even when the recipient address and
+        the subject do not contain it."""
+        if not text:
+            return
+        for variant, folded in zip(pattern.variants, fold_variants(text)):
+            core = variant["core"]
+            # Clause boundaries become a marker token.
+            tokens = tokenize(_CLAUSE_BREAK_RE.sub(" 0clausebreak0 ", folded))
+            for index, token in enumerate(tokens):
+                if token != "bei":
+                    continue
+                pos = index + 1
+                if pos < len(tokens) and tokens[pos] in _ARTICLES:
+                    pos += 1
+                matched = 0
+                while pos < len(tokens) and matched < len(core):
+                    if tokens[pos] == core[matched]:
+                        matched += 1
+                    elif not (matched and (tokens[pos] in CONNECTOR_TOKENS or tokens[pos] in LEGAL_FORM_TOKENS)):
+                        break
+                    pos += 1
+                if matched < len(core):
+                    continue
+                while pos < len(tokens) and tokens[pos] in LEGAL_FORM_TOKENS:
+                    pos += 1                       # "bei Barth & Kerner GmbH ..."
+                for following in tokens[pos:pos + 8]:
+                    if following in _CLAUSE_END_TOKENS:
+                        break
+                    if following in _APPLY_WORDS:
+                        evidence.append(Evidence(
+                            "application sentence", STRONG,
+                            f"'bei {pattern.company} bewerben' in the text"))
+                        return
 
     def _check_text_field(
         self,

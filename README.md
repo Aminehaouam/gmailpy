@@ -348,11 +348,14 @@ second**:
 3. It looks at your **most recent drafts** (fast – not the whole mailbox; the
    app reads them ahead of time while nothing is waiting) and picks the draft
    for that company: the one draft whose subject or recipient clearly
-   contains the company; for the latest PDF otherwise **your latest draft**
+   contains the company, or whose text says "… bei <company> bewerben"
+   (the sentence of the application skills, with the word of the file
+   name); for the latest PDF otherwise **your latest draft**
    if it mentions the company anywhere (subject, recipient or text) and is
    not clearly the draft of another waiting PDF.
 4. It attaches the PDF and **sends the e-mail**, and plays a short
-   **success chime**. The banner shows "Last sent: ...". In batch mode the
+   **success chime**. The banner shows "Last sent: ...". The 50 newest
+   drafts are looked at (`auto_recent_drafts`). In batch mode the
    next PDF follows right away; a PDF that cannot be sent yet does not hold
    up the others.
 
@@ -411,7 +414,9 @@ punctuation and extra spaces are ignored; umlauts match their spellings
 | Where the full company name is found | Strength |
 |---|---|
 | Subject, recipient name, or recipient e-mail domain (`bewerbung@trompetter.de`) | **Strong** |
-| Only the e-mail text (or only the part before `@`) | **Possible** |
+| The application sentence in the text: "… **bei Knorr bewerben**" (also "bei der Knorr GmbH in Bremen … bewerben"; `bewerben` in the same part of the sentence) | **Strong** |
+| The text and the part before `@` together | **Strong** |
+| Only somewhere else in the e-mail text (or only the part before `@`) | **Possible** |
 | Only part of the name, a similar spelling, or the name inside a longer word | **Weak** (never sufficient) |
 
 E-mail domains of general providers (gmail.com, gmx.de, web.de, ...) are

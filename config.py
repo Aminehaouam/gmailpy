@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 
 APP_NAME = "Bewerbung Attach Assistant"
 APP_ID = "BewerbungAttachAssistant"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 
 # The only OAuth scope the application requests.
 #
@@ -203,7 +203,7 @@ DEFAULT_JOB_TITLES = (["Elektroniker"] + _gastronomy_job_titles()
 
 # Bumped when defaults change; older config.json files get the new defaults
 # (see Config.load).
-CONFIG_VERSION = 4
+CONFIG_VERSION = 5
 
 DEFAULTS: dict[str, Any] = {
     "config_version": CONFIG_VERSION,
@@ -225,8 +225,9 @@ DEFAULTS: dict[str, Any] = {
     # Look again after this many seconds when the draft is not ready yet
     # (PDFs waiting for minutes are looked at less often).
     "auto_retry_seconds": 1.0,
-    # Number of most recent drafts that are checked in automatic mode.
-    "auto_recent_drafts": 15,
+    # Number of most recent drafts that are checked in automatic mode (an
+    # application run can leave many drafts; drafts already read are cached).
+    "auto_recent_drafts": 50,
     # Batch mode: every new PDF is handled (each into its own draft), not
     # only the latest one.  PDFs saved up to auto_batch_lookback_minutes
     # before the app started count as new.
@@ -363,6 +364,9 @@ class Config:
             if isinstance(parser, dict) and isinstance(parser.get("job_titles"), list):
                 titles = [t for t in parser["job_titles"] if isinstance(t, str)]
                 parser["job_titles"] = titles + [t for t in DEFAULT_JOB_TITLES if t not in titles]
+        if version < 5 and overrides.get("auto_recent_drafts") == 15:
+            # Version 5 checks the 50 newest drafts instead of 15.
+            overrides.pop("auto_recent_drafts")
         if version < CONFIG_VERSION:
             overrides["config_version"] = CONFIG_VERSION
         return cls(paths, _deep_merge(DEFAULTS, overrides))

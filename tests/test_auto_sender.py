@@ -461,4 +461,78 @@ def test_version_3_config_gets_gastronomy_titles_and_keeps_own_settings(paths):
     assert titles.count("Elektroniker") == 1
     assert cfg.watch_interval_ms == 1000 and cfg.auto_send is True  # version 3 settings stay
     cfg.save()
-    assert Config.load(paths).data["config_version"] == 4
+    from config import CONFIG_VERSION
+    assert Config.load(paths).data["config_version"] == CONFIG_VERSION
+
+
+# --------------------------------------------------------------------------
+# Real case: company only in the application sentence ("bei Knorr bewerben"),
+# recipient address of the hotel without that word, other drafts newer.
+# --------------------------------------------------------------------------
+
+def skill_body(job, word):
+    return ("Sehr geehrte Damen und Herren,\n\n"
+            f"gerne möchte ich mich um einen Ausbildungsplatz zum {job} (m/w/d) bei {word} bewerben.\n\n"
+            "Im Anhang finden Sie meine vollständigen Bewerbungsunterlagen als PDF-Datei.\n\n"
+            "Ich freue mich auf die Möglichkeit, mich Ihnen in einem Online-Vorstellungsgespräch "
+            "persönlich vorzustellen.\n\nMit freundlichen Grüßen\nAmine Haouam")
+
+
+RVG = "Fachmann für Restaurants und Veranstaltungsgastronomie"
+
+
+def test_application_sentence_is_a_clear_match(sender, backend, folder, make_pdf):
+    knorr = draft(backend, f"Bewerbung um einen Ausbildungsplatz zum {RVG} (m/w/d)",
+                  "info@alte-muehle-hotel.com", body=skill_body(RVG, "Knorr"), age_s=600)
+    draft(backend, "Bewerbung um einen Ausbildungsplatz zum Hotelfachmann (m/w/d)",       # newer draft
+          "info@seehotel-example.de", body=skill_body("Hotelfachmann", "Laichingen"), age_s=60)
+    make_pdf("Amine_Haouam_Ausbildung_Gastronomie_Knorr.pdf", age=30)
+    result = sender.run_once(folder, dry_run=False)
+    assert result.kind == SENT, result.message
+    assert [s["draft_id"] for s in backend.sent] == [knorr]
+
+
+def test_bulk_skill_run_every_pdf_finds_its_draft(batch_sender, backend, folder, make_pdf):
+    """A skill run made 20 drafts; the PDFs are saved afterwards in another
+    order. Each goes to its own draft - also drafts older than the newest 15."""
+    words = [f"Betrieb{chr(65 + i)}" for i in range(20)]
+    ids = {w: draft(backend, f"Bewerbung um einen Ausbildungsplatz zum {RVG} (m/w/d)", f"info@hotel{i}.de",
+                    body=skill_body(RVG, w), age_s=3000 - i * 60) for i, w in enumerate(words)}
+    order = words[::-1][:5] + words[:3]                  # newest drafts first, then the oldest ones
+    for n, w in enumerate(order):
+        make_pdf(f"Amine_Haouam_Ausbildung_Gastronomie_{w}.pdf", age=100 - n)
+    sent = [batch_sender.run_once(folder, dry_run=False) for _ in order]
+    assert [r.kind for r in sent] == [SENT] * len(order), [r.message for r in sent]
+    assert [s["draft_id"] for s in backend.sent] == [ids[w] for w in order]
+
+
+def test_draft_older_than_the_newest_15_is_found(sender, backend, folder, make_pdf, config):
+    config.data["auto_batch"] = False
+    target = draft(backend, f"Bewerbung um einen Ausbildungsplatz zum {RVG} (m/w/d)", "info@altehotel.de",
+                   body=skill_body(RVG, "Knorr"), age_s=9000)
+    for i in range(39):                                         # 39 newer drafts of other companies
+        draft(backend, "Bewerbung um einen Ausbildungsplatz zum Hotelfachmann (m/w/d)", f"info@h{i}.de",
+              body=skill_body("Hotelfachmann", f"Betrieb{i}"), age_s=8000 - i * 60)
+    make_pdf("Amine_Haouam_Ausbildung_Gastronomie_Knorr.pdf", age=30)
+    result = sender.run_once(folder, dry_run=False)
+    assert result.kind == SENT, result.message
+    assert [s["draft_id"] for s in backend.sent] == [target]
+
+
+def test_text_only_mention_explains_why_it_waits(sender, backend, folder, make_pdf):
+    draft(backend, "Bewerbung", "info@altehotel.de", age_s=600,
+          body="Sehr geehrte Damen und Herren, ich habe schon bei Knorr gearbeitet und bewerbe mich.")
+    draft(backend, "Bewerbung Siemens", "jobs@siemens.com", age_s=60)
+    make_pdf("Amine_Haouam_Ausbildung_Gastronomie_Knorr.pdf", age=30)
+    result = sender.run_once(folder, dry_run=False)
+    assert result.kind == WAITING and backend.sent == []
+    assert "only somewhere in the text" in result.message
+
+
+def test_version_4_config_checks_50_drafts(paths):
+    import json
+    from config import Config
+    paths.config_file.write_text(json.dumps({"config_version": 4, "auto_recent_drafts": 15}), encoding="utf-8")
+    assert Config.load(paths).data["auto_recent_drafts"] == 50
+    paths.config_file.write_text(json.dumps({"config_version": 4, "auto_recent_drafts": 30}), encoding="utf-8")
+    assert Config.load(paths).data["auto_recent_drafts"] == 30           # own value kept

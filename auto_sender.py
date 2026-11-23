@@ -11,7 +11,8 @@ Twice a second AutoSender.run_once():
 4. reads only your most recent drafts (fast; read ahead of time while
    nothing is waiting) and picks the draft:
      * exactly one recent draft clearly matches (company in subject,
-       recipient name or recipient domain)          -> that draft
+       recipient name or recipient domain, or the application sentence
+       "... bei <company> bewerben")                -> that draft
      * for the latest PDF only: your LATEST draft, if it mentions the company
        anywhere (subject, recipient or text) and is not clearly the draft of
        another waiting PDF                           -> the latest draft
@@ -233,6 +234,10 @@ class AutoSender:
             return None, f"{len(strong)} recent drafts are for '{company}' - delete the extra one"
         if allow_latest and latest_match is not None and latest_match.strength == POSSIBLE:
             return latest, "latest draft, company found in " + latest_match.evidence_summary()
+        possible = [m for m in outcome.all_matches if m.strength == POSSIBLE]
+        if possible:
+            return None, (f"'{company}' appears only somewhere in the text of {len(possible)} draft(s), "
+                          f"not in the subject, the recipient or the sentence 'bei {company} bewerben'")
         return None, f"no recent draft mentions '{company}' yet"
 
     def draft_not_ready(self, draft: DraftInfo) -> str | None:
