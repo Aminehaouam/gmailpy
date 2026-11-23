@@ -18,8 +18,11 @@ Rules
   the configured applicant name, default 2).  If an applicant name is
   configured, the components must match it.
 * Next comes one of the configured application types (default "Ausbildung"),
-  then one of the configured job titles (default "Elektroniker").  Multi-word
-  types/titles are supported; the longest configured title wins.
+  then one of the configured job titles (default: Elektroniker, the
+  Gastronomie/hotel professions such as Gastronomie, Hotelfachfrau, Koch,
+  Fachkraft fuer Restaurants und Veranstaltungsgastronomie, and Pflege).
+  Multi-word types/titles are supported; the longest configured title wins.
+  "für", "fuer" and "fur" (likewise ä/ö) are treated alike.
 * All remaining components form the company name; underscores become spaces.
   Company names may consist of any number of words.
 * Copy markers added by Windows/browsers (" (1)", " - Kopie") and configured
@@ -69,6 +72,12 @@ def _norm(token: str) -> str:
     return normalize_text(token).replace(" ", "")
 
 
+def _loose(token: str) -> str:
+    """For job titles and application types: umlauts written with or
+    without "e" count alike ("für" = "fuer" = "fur", "Köchin" = "Kochin")."""
+    return _norm(token).replace("ae", "a").replace("oe", "o").replace("ue", "u")
+
+
 def _split(text: str) -> list[str]:
     return [t for t in _SEPARATOR_RE.split(text.strip()) if t]
 
@@ -88,6 +97,7 @@ class FilenameParser:
         self.application_types = self._prepare_sequences(settings.get("application_types", []))
         self.require_application_type = bool(settings.get("require_application_type", True))
         self.job_titles = self._prepare_sequences(settings.get("job_titles", []))
+        self.job_title_names = [str(t).strip() for t in settings.get("job_titles", []) if str(t).strip()]
         self.require_job_title = bool(settings.get("require_job_title", True))
         self.ignored_trailing = [
             re.compile(pattern, re.I) for pattern in settings.get("ignored_trailing_tokens", [])
@@ -99,7 +109,7 @@ class FilenameParser:
         prepared = []
         for value in values:
             tokens = _split(value.replace("_", " "))
-            norm = [_norm(t) for t in tokens if _norm(t)]
+            norm = [_loose(t) for t in tokens if _loose(t)]
             if norm:
                 prepared.append((value.strip(), norm))
         prepared.sort(key=lambda item: len(item[1]), reverse=True)
@@ -135,6 +145,7 @@ class FilenameParser:
 
         tokens = _split(stem)
         tokens_norm = [_norm(t) for t in tokens]
+        tokens_loose = [_loose(t) for t in tokens]
         result.suggestion = self._suggest(tokens)
 
         expected_layout = "Name_Name_Ausbildung_Beruf_Firma.pdf"
@@ -158,7 +169,7 @@ class FilenameParser:
 
         # 2. Application type ("Ausbildung")
         if self.application_types:
-            matched = self._match_sequence(tokens_norm, pos, self.application_types)
+            matched = self._match_sequence(tokens_loose, pos, self.application_types)
             if matched:
                 result.application_type = " ".join(tokens[pos:pos + matched[1]])
                 pos += matched[1]
@@ -171,14 +182,15 @@ class FilenameParser:
                 )
                 return result
 
-        # 3. Job title ("Elektroniker")
+        # 3. Job title ("Elektroniker", "Gastronomie", "Hotelfachfrau", ...)
         if self.job_titles:
-            matched = self._match_sequence(tokens_norm, pos, self.job_titles)
+            matched = self._match_sequence(tokens_loose, pos, self.job_titles)
             if matched:
                 result.job_title = " ".join(tokens[pos:pos + matched[1]])
                 pos += matched[1]
             elif self.require_job_title:
-                expected = ", ".join(d for d, _ in self.job_titles)
+                names = self.job_title_names
+                expected = ", ".join(names[:6]) + (f", ... - {len(names)} in Settings" if len(names) > 6 else "")
                 found = tokens[pos] if pos < len(tokens) else "nothing"
                 result.error = (
                     f"Expected a known job title ({expected}) after the application type, "
@@ -223,7 +235,7 @@ class FilenameParser:
         """Best-effort default text for the manual company input dialog."""
         n = self.applicant_parts
         rest = tokens[n:] if len(tokens) > n else tokens
-        rest_norm = [_norm(t) for t in rest]
+        rest_norm = [_loose(t) for t in rest]
         for options in (self.application_types, self.job_titles):
             matched = self._match_sequence(rest_norm, 0, options) if options else None
             if matched:

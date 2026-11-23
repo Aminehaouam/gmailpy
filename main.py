@@ -165,6 +165,10 @@ def self_test() -> int:
             "Amine_Haouam_Ausbildung_Elektroniker_Barth_und_Kerner_GmbH.pdf")
         if result.company != "Barth und Kerner GmbH":
             raise RuntimeError(f"unexpected company {result.company!r}")
+        gastro = FilenameParser(DEFAULTS["filename_parser"]).parse(
+            "Amine_Haouam_Ausbildung_Fachkraft_fur_Restaurants_und_Veranstaltungsgastronomie_Hotel_Adler.pdf")
+        if gastro.company != "Hotel Adler":
+            raise RuntimeError(f"unexpected company {gastro.company!r}")
         return "file name parser OK"
 
     for name, fn in (("Gmail API", gmail_api), ("OAuth", oauth), ("Database", database),

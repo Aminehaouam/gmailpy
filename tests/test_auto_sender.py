@@ -219,7 +219,8 @@ def test_old_config_gets_new_fast_timings(paths):
     assert cfg.data["auto_batch"] is True
     assert cfg.auto_send is True and cfg.dry_run is False      # user choices are kept
     cfg.save()
-    assert Config.load(paths).data["config_version"] == 3
+    from config import CONFIG_VERSION
+    assert Config.load(paths).data["config_version"] == CONFIG_VERSION
 
 
 def test_version_2_config_gets_version_3_timings(paths):
@@ -409,3 +410,55 @@ def test_pdf_being_saved_is_looked_at_again_soon(sender, folder, make_pdf):
     result = sender.run_once(folder, dry_run=False)
     assert result.kind == WAITING and result.message == "still being saved"
     assert abs(result.details["soon"] - 0.15) < 0.01             # min. age 0.2 s
+
+
+# --------------------------------------------------------------------------
+# Gastronomie applications (subject without company, as the skill writes it)
+# --------------------------------------------------------------------------
+
+GASTRO_SUBJECT = "Bewerbung um einen Ausbildungsplatz zum Fachmann für Restaurants und Veranstaltungsgastronomie (m/w/d)"
+
+
+def gastro_body(word):
+    return (f"Sehr geehrte Damen und Herren,\n\ngerne möchte ich mich um einen Ausbildungsplatz zum Fachmann "
+            f"für Restaurants und Veranstaltungsgastronomie (m/w/d) bei {word} bewerben.\n"
+            "Im Anhang finden Sie meine vollständigen Bewerbungsunterlagen als PDF-Datei.")
+
+
+def test_gastronomy_application_is_sent(sender, backend, folder, make_pdf):
+    target = draft(backend, GASTRO_SUBJECT, "info@gasthaus-krone.de", body=gastro_body("Krone"))
+    draft(backend, "Bewerbung Siemens", "jobs@siemens.com", age_s=7200)
+    make_pdf("Amine_Haouam_Ausbildung_Gastronomie_Krone.pdf", age=30)
+    result = sender.run_once(folder, dry_run=False)
+    assert result.kind == SENT, result.message
+    assert [s["draft_id"] for s in backend.sent] == [target]
+
+
+def test_gastronomy_batch_with_free_mail_addresses(batch_sender, backend, folder, make_pdf):
+    """Small restaurants often use web.de/gmx addresses: the company in the
+    address plus the company in the text is a clear match, so older PDFs
+    of a batch are sent too."""
+    linde = draft(backend, GASTRO_SUBJECT, "gasthof.linde@web.de", body=gastro_body("Linde"))
+    adler = draft(backend, GASTRO_SUBJECT, "info@hotel-adler.de", body=gastro_body("Adler"))
+    make_pdf("Amine_Haouam_Ausbildung_Gastronomie_Linde.pdf", age=50)
+    make_pdf("Amine_Haouam_Ausbildung_Hotelfachmann_Adler.pdf", age=30)
+    results = [batch_sender.run_once(folder, dry_run=False) for _ in range(2)]
+    assert [r.kind for r in results] == [SENT, SENT]
+    assert [s["draft_id"] for s in backend.sent] == [linde, adler]
+
+
+def test_version_3_config_gets_gastronomy_titles_and_keeps_own_settings(paths):
+    import json
+    from config import Config
+    paths.config_file.write_text(json.dumps({
+        "config_version": 3, "watch_interval_seconds": 1.0, "auto_send": True,
+        "filename_parser": {"job_titles": ["Elektroniker", "Mechatroniker"]},
+    }), encoding="utf-8")
+    cfg = Config.load(paths)
+    titles = cfg.filename_parser["job_titles"]
+    assert titles[:2] == ["Elektroniker", "Mechatroniker"]          # own titles first, kept
+    assert "Gastronomie" in titles and "Hotelfachfrau" in titles and "Pflegefachmann" in titles
+    assert titles.count("Elektroniker") == 1
+    assert cfg.watch_interval_ms == 1000 and cfg.auto_send is True  # version 3 settings stay
+    cfg.save()
+    assert Config.load(paths).data["config_version"] == 4

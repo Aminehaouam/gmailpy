@@ -114,3 +114,61 @@ def test_optional_application_type_and_title(parser_settings):
     parser = FilenameParser(parser_settings)
     assert parser.parse("Amine_Haouam_Trompetter.pdf").company == "Trompetter"
     assert parser.parse("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf").company == "Trompetter"
+
+
+# -- Gastronomie, hotels (and Pflege) -------------------------------------
+
+@pytest.mark.parametrize("name, title, company", [
+    # File names of the Gastronomie application skill
+    ("Amine_Haouam_Ausbildung_Gastronomie_Krone.pdf", "Gastronomie", "Krone"),
+    ("Amine_Haouam_Ausbildung_Gastronomie_Hotel_zur_Post.pdf", "Gastronomie", "Hotel zur Post"),
+    # Job names written out - für / fuer / fur all work
+    ("Amine_Haouam_Ausbildung_Fachkraft_fur_Restaurants_und_Veranstaltungsgastronomie_Hotel_Adler.pdf",
+     "Fachkraft fur Restaurants und Veranstaltungsgastronomie", "Hotel Adler"),
+    ("Amine_Haouam_Ausbildung_Fachmann_für_Restaurants_und_Veranstaltungsgastronomie_Seehof.pdf",
+     "Fachmann für Restaurants und Veranstaltungsgastronomie", "Seehof"),
+    ("Amine_Haouam_Ausbildung_Fachfrau_fuer_Systemgastronomie_Burgerhaus_GmbH.pdf",
+     "Fachfrau fuer Systemgastronomie", "Burgerhaus GmbH"),
+    ("Amine_Haouam_Ausbildung_Fachkraft_fuer_Gastronomie_Brauhaus_Sion.pdf",
+     "Fachkraft fuer Gastronomie", "Brauhaus Sion"),
+    ("Amine_Haouam_Ausbildung_Fachkraft_im_Gastgewerbe_Gasthof_Linde.pdf",
+     "Fachkraft im Gastgewerbe", "Gasthof Linde"),
+    ("Amine_Haouam_Ausbildung_Hotelfachmann_Parkhotel_Bremen.pdf", "Hotelfachmann", "Parkhotel Bremen"),
+    ("Amine_Haouam_Ausbildung_Hotelfachfrau_Seehotel_Maier.pdf", "Hotelfachfrau", "Seehotel Maier"),
+    ("Amine_Haouam_Ausbildung_Kaufmann_für_Hotelmanagement_Steigenberger.pdf",
+     "Kaufmann für Hotelmanagement", "Steigenberger"),
+    ("Amine_Haouam_Ausbildung_Restaurantfachmann_Ratskeller.pdf", "Restaurantfachmann", "Ratskeller"),
+    ("Amine_Haouam_Ausbildung_Koch_Restaurant_Bella_Italia.pdf", "Koch", "Restaurant Bella Italia"),
+    ("Amine_Haouam_Ausbildung_Köchin_Gasthof_Zur_Post.pdf", "Köchin", "Gasthof Zur Post"),
+    ("Amine_Haouam_Ausbildung_Kochin_Gasthof_Zur_Post.pdf", "Kochin", "Gasthof Zur Post"),
+    ("Amine_Haouam_Ausbildung_Fachkraft_Küche_Landgasthof_Linde.pdf", "Fachkraft Küche", "Landgasthof Linde"),
+    ("Amine_Haouam_Ausbildung_Pflegefachmann_Caritas.pdf", "Pflegefachmann", "Caritas"),
+    # Elektroniker unchanged
+    ("Amine_Haouam_Ausbildung_Elektroniker_Barth_und_Kerner_GmbH.pdf", "Elektroniker", "Barth und Kerner GmbH"),
+])
+def test_gastronomy_professions(parser, name, title, company):
+    result = parser.parse(name)
+    assert result.ok, result.error
+    assert (result.job_title, result.company) == (title, company)
+
+
+def test_full_gastronomy_title_wins_over_shorter_one(parser):
+    """'Fachkraft fuer Restaurants' is a title too - the full name must win,
+    otherwise 'und Veranstaltungsgastronomie' would end up in the company."""
+    result = parser.parse("Amine_Haouam_Ausbildung_Fachkraft_fuer_Restaurants_und_Veranstaltungsgastronomie_"
+                          "Krone.pdf")
+    assert result.company == "Krone"
+    assert parser.parse("Amine_Haouam_Ausbildung_Fachkraft_fuer_Restaurants_Krone.pdf").company == "Krone"
+
+
+def test_unknown_profession_still_fails_with_short_message(parser):
+    result = parser.parse("Amine_Haouam_Ausbildung_Baecker_Krone.pdf")
+    assert not result.ok and result.company is None
+    assert "found 'Baecker'" in result.error and "in Settings" in result.error
+    assert len(result.error) < 250
+
+
+def test_only_part_of_a_job_name_fails_safely(parser):
+    """'Fachkraft' alone is no job title: the company would start with 'fuer'."""
+    result = parser.parse("Amine_Haouam_Ausbildung_Fachkraft_fuer_Bar_und_Lounge_Krone.pdf")
+    assert not result.ok

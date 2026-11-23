@@ -65,7 +65,8 @@ attachment to an existing draft after you confirm it.
 
 1. You write your cover letter as a **Gmail draft** (recipient, subject, text).
 2. You save the application PDF in `Desktop\Bewerbungen`, named like
-   `Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf`.
+   `Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf` or
+   `Amine_Haouam_Ausbildung_Gastronomie_Krone.pdf`.
 3. You click **Scan for newest PDF**. The app selects the newest PDF that has
    not been processed yet and extracts the company (`Trompetter`).
 4. It reads your Gmail drafts and searches for the company in the subject,
@@ -267,16 +268,28 @@ Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf
     -> company "Trompetter"
 Amine_Haouam_Ausbildung_Elektroniker_Barth_und_Kerner_GmbH.pdf
     -> company "Barth und Kerner GmbH"
+Amine_Haouam_Ausbildung_Gastronomie_Krone.pdf
+    -> company "Krone"
+Amine_Haouam_Ausbildung_Fachkraft_fuer_Restaurants_und_Veranstaltungsgastronomie_Hotel_Adler.pdf
+    -> company "Hotel Adler"
 ```
 
 Rules (defaults, changeable under **File → Settings...**):
 
 * The first components must be the applicant name **Amine Haouam**
   (leave the field empty to accept any name; then *Name parts* = 2 is used).
-* Then the application type **Ausbildung**, then the job title
-  **Elektroniker**. Several types/titles can be entered, comma-separated;
-  multi-word titles work (`Elektroniker für Betriebstechnik`), the longest
-  matching title wins.
+* Then the application type **Ausbildung**, then a known job title:
+  **Elektroniker**, every **Gastronomie / hotel** profession – `Gastronomie`,
+  `Hotellerie`, `Fachmann/Fachfrau/Fachkraft für Restaurants und
+  Veranstaltungsgastronomie`, `... für Systemgastronomie`, `Fachkraft für
+  Gastronomie`, `Fachkraft im Gastgewerbe`, `Hotelfachmann/-frau`,
+  `Kaufmann/Kauffrau für Hotelmanagement`, `Restaurantfachmann/-frau`,
+  `Koch/Köchin`, `Fachkraft Küche` (each also without "für") – and
+  `Pflegefachmann/-frau`. "für", "fuer" and "fur" count alike (also
+  ä/ö). Further titles can be added, comma-separated; multi-word titles work
+  (`Elektroniker für Betriebstechnik`), the longest matching title wins. A
+  file whose job title is not in the list is never guessed: the app asks for
+  the company (automatic mode: waits and shows why).
 * Everything after the job title is the company name; underscores become
   spaces. Company names can have any number of words.
 * Copy markers (`... (1).pdf`, `... - Kopie.pdf`) and version markers at the

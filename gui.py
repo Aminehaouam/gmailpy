@@ -1979,7 +1979,9 @@ class App(tk.Tk):
         self.show_info(
             "1. Write your cover letter as a Gmail draft (recipient + subject).\n"
             "2. Save the application PDF in the Bewerbungen folder, named like\n"
-            "   Amine_Haouam_Ausbildung_Elektroniker_<Company>.pdf\n"
+            "   Amine_Haouam_Ausbildung_Elektroniker_<Company>.pdf or\n"
+            "   Amine_Haouam_Ausbildung_Gastronomie_<Company>.pdf (also Hotelfachfrau, Koch,\n"
+            "   Fachkraft_fuer_Restaurants_und_Veranstaltungsgastronomie, ...)\n"
             "3. Click 'Scan for newest PDF'. The newest unprocessed PDF is selected and the company "
             "name is read from the file name.\n"
             "4. The app searches your drafts for the company (subject, recipients, text).\n"

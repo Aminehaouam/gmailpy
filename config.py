@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 
 APP_NAME = "Bewerbung Attach Assistant"
 APP_ID = "BewerbungAttachAssistant"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 # The only OAuth scope the application requests.
 #
@@ -176,9 +176,34 @@ DEFAULT_GENERIC_EMAIL_DOMAINS = [
     "zoho.com", "yandex.com", "mail.com", "kabelmail.de", "vodafone.de",
 ]
 
-# Bumped when default timings change; older config.json files get the new
-# timing defaults (see Config.load).
-CONFIG_VERSION = 3
+def _gastronomy_job_titles() -> list[str]:
+    """Ausbildungsberufe in Gastronomie and hotels as they appear in file
+    names: current and older job names, male/female/neutral forms, with and
+    without "fuer" ("für", "fur" and "fuer" are treated alike)."""
+    titles = ["Gastronomie", "Hotellerie", "Gastgewerbe",
+              "Hotelfachmann", "Hotelfachfrau", "Hotelfachkraft",
+              "Hotelkaufmann", "Hotelkauffrau", "Hotelmanagement",
+              "Restaurantfachmann", "Restaurantfachfrau", "Restaurantfachkraft",
+              "Systemgastronomie", "Veranstaltungsgastronomie",
+              "Restaurants und Veranstaltungsgastronomie",
+              "Koch", "Koechin", "Fachkraft Kueche", "Fachkraft fuer Kueche",
+              "Fachkraft im Gastgewerbe", "Fachkraft Gastgewerbe"]
+    for person in ("Fachmann", "Fachfrau", "Fachkraft"):
+        for subject in ("Restaurants und Veranstaltungsgastronomie", "Restaurants",
+                        "Systemgastronomie", "Gastronomie"):
+            titles += [f"{person} fuer {subject}", f"{person} {subject}"]
+    for person in ("Kaufmann", "Kauffrau"):
+        titles += [f"{person} fuer Hotelmanagement", f"{person} Hotelmanagement"]
+    return titles
+
+
+# Job titles accepted in the PDF file name (the longest matching one wins).
+DEFAULT_JOB_TITLES = (["Elektroniker"] + _gastronomy_job_titles()
+                      + ["Pflegefachmann", "Pflegefachfrau", "Pflegefachkraft"])
+
+# Bumped when defaults change; older config.json files get the new defaults
+# (see Config.load).
+CONFIG_VERSION = 4
 
 DEFAULTS: dict[str, Any] = {
     "config_version": CONFIG_VERSION,
@@ -239,7 +264,7 @@ DEFAULTS: dict[str, Any] = {
         # Known job titles; one must follow the application type.  Multi-word
         # titles are allowed ("Elektroniker fuer Betriebstechnik").  The
         # longest matching title wins.
-        "job_titles": ["Elektroniker"],
+        "job_titles": list(DEFAULT_JOB_TITLES),
         "require_job_title": True,
         # Trailing tokens that are version markers, not part of the company.
         # Regular expressions, matched case-insensitively against a whole token.
@@ -319,7 +344,9 @@ class Config:
             except (OSError, ValueError) as exc:
                 log.warning("Could not read config.json (%s) - using defaults", exc)
         version = overrides.get("config_version", 1)
-        if not isinstance(version, int) or version < CONFIG_VERSION:
+        if not isinstance(version, int):
+            version = 1
+        if version < 3:
             # Version 2 made automatic sending immediate, version 3 faster:
             # drop the old, slower timing values so the new defaults apply.
             for key in ("draft_settle_seconds", "auto_retry_seconds", "watch_interval_seconds",
@@ -329,6 +356,14 @@ class Config:
             if isinstance(scanner, dict):
                 scanner.pop("min_file_age_seconds", None)
                 scanner.pop("stability_check_seconds", None)
+        if version < 4:
+            # Version 4 added the Gastronomie (and Pflege) job titles: add
+            # them to the saved list, keeping titles the user entered.
+            parser = overrides.get("filename_parser")
+            if isinstance(parser, dict) and isinstance(parser.get("job_titles"), list):
+                titles = [t for t in parser["job_titles"] if isinstance(t, str)]
+                parser["job_titles"] = titles + [t for t in DEFAULT_JOB_TITLES if t not in titles]
+        if version < CONFIG_VERSION:
             overrides["config_version"] = CONFIG_VERSION
         return cls(paths, _deep_merge(DEFAULTS, overrides))
 
