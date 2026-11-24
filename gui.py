@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import time
 import traceback
 from concurrent.futures import Future
 from datetime import datetime, timedelta
@@ -689,6 +690,10 @@ class App(tk.Tk):
         self._auto_sender: AutoSender | None = None
         self._auto_running = False       # an automatic check is queued/running
         self._auto_last: AutoResult | None = None
+        # Automatic mode reconnects Gmail by itself (network drop at startup,
+        # after sleep, temporary sign-in problem) - no restart needed.
+        self._reconnect_delay = self.RECONNECT_FIRST_SECONDS
+        self._reconnect_at = time.monotonic() + self.RECONNECT_FIRST_SECONDS
         self._last_sent: AutoResult | None = None
         self._last_problem: AutoResult | None = None
         self._watch_text = ""
@@ -1192,6 +1197,9 @@ class App(tk.Tk):
             self.gmail_pill.configure(text="● Gmail: not connected", style="PillOff.TLabel")
             self.connect_button.configure(text="Connect Gmail")
         self._refresh_buttons()
+        if hasattr(self, "banner"):          # (not while the window is being built)
+            self._watch_text = ""
+            self._show_watch_status()
 
     def _refresh_buttons(self) -> None:
         def enable(widget: ttk.Widget, on: bool) -> None:
@@ -1348,6 +1356,7 @@ class App(tk.Tk):
 
         def on_success(client: GmailClient) -> None:
             self.gmail = client
+            self._reconnect_delay = self.RECONNECT_FIRST_SECONDS
             self._set_gmail_state("connected")
             self._set_status(f"Connected to Gmail as {client.account_email}.")
             self._run_recovery_then_continue()
@@ -1383,8 +1392,12 @@ class App(tk.Tk):
         def on_success(messages: list[str]) -> None:
             self.refresh_history()
             if messages:
-                self.show_info("Earlier interrupted or unverified operations were checked:\n\n"
-                               + "\n".join(f"- {m}" for m in messages))
+                text = ("Earlier interrupted or unverified operations were checked:\n\n"
+                        + "\n".join(f"- {m}" for m in messages))
+                if self.auto_check_var.get() and self.send_enabled:
+                    log.info(text)          # no dialog: it would pause the automatic mode
+                else:
+                    self.show_info(text)
             self._continue_after_connect()
 
         self._run_task("Checking earlier interrupted operations...", manager.recover_interrupted, on_success)
@@ -1722,12 +1735,31 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     # Automatic checking / sending
     # ------------------------------------------------------------------
+    RECONNECT_FIRST_SECONDS = 10.0
+    RECONNECT_MAX_SECONDS = 120.0
+
     def _auto_tick(self) -> None:
         """Runs twice a second while automatic checking is on."""
         try:
+            self._maybe_reconnect()
             self._auto_now()
         finally:
             self.after(self.config_obj.watch_interval_ms, self._auto_tick)
+
+    def _maybe_reconnect(self) -> None:
+        """Automatic mode: Gmail is not connected although a saved sign-in
+        exists -> connect again with it (every 10 s at first, then less
+        often, at most every 2 minutes)."""
+        if (not self.auto_check_var.get() or self.gmail is not None or self.busy or self._modal_depth
+                or self.gmail_state == "connecting" or not self.token_store.exists()):
+            return
+        now = time.monotonic()
+        if now < self._reconnect_at:
+            return
+        self._reconnect_at = now + self._reconnect_delay
+        self._reconnect_delay = min(self._reconnect_delay * 2, self.RECONNECT_MAX_SECONDS)
+        log.info("Gmail is not connected - connecting again with the saved sign-in")
+        self.connect_gmail(interactive=False)
 
     def _auto_now(self) -> None:
         """One automatic check, if nothing else is going on."""
@@ -1832,6 +1864,13 @@ class App(tk.Tk):
             mode += " (DRY-RUN: nothing is really sent)"
         lines = [f"Watching the folder every {interval} s - {mode}."]
         kind = "info"
+        if self.gmail is None and self.gmail_state != "connecting":
+            kind = "warn"
+            if self.token_store.exists():
+                lines.append("Gmail is not connected - connecting again automatically...")
+            else:
+                lines.append("Gmail sign-in needed: click 'Connect Gmail' (the saved sign-in expired "
+                             "or was removed).")
         if result is not None and self.send_enabled:
             if result.kind == WAITING:
                 when = (datetime.now() + timedelta(seconds=result.retry_in)).strftime("%H:%M:%S")

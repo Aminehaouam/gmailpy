@@ -536,3 +536,69 @@ def test_version_4_config_checks_50_drafts(paths):
     assert Config.load(paths).data["auto_recent_drafts"] == 50
     paths.config_file.write_text(json.dumps({"config_version": 4, "auto_recent_drafts": 30}), encoding="utf-8")
     assert Config.load(paths).data["auto_recent_drafts"] == 30           # own value kept
+
+
+# --------------------------------------------------------------------------
+# Draft created together with the PDF (Claude's Gmail tool attaches it):
+# the same PDF is in the draft and in the folder -> send it as it is.
+# --------------------------------------------------------------------------
+
+def draft_with_pdf(backend, word, pdf_bytes, filename=None, age_s=120):
+    raw = ms.mixed_draft_with_attachment(
+        f"Bewerbung um einen Ausbildungsplatz zum {RVG} (m/w/d)", f"info@hotel-{word.lower()}.de",
+        pdf_bytes, filename or f"Amine_Haouam_Ausbildung_Gastronomie_{word}.pdf",
+        body_plain=skill_body(RVG, word))
+    return backend.add_draft(raw, internal_date_ms=int((time.time() - age_s) * 1000)), raw
+
+
+def test_draft_that_already_contains_the_pdf_is_sent_as_it_is(sender, backend, folder, make_pdf, db):
+    pdf_path = make_pdf("Amine_Haouam_Ausbildung_Gastronomie_Baumanns.pdf", age=30)
+    target, raw = draft_with_pdf(backend, "Baumanns", pdf_path.read_bytes())
+    result = sender.run_once(folder, dry_run=False)
+    assert result.kind == SENT, result.message
+    assert "was already in the draft" in result.message
+    assert [s["draft_id"] for s in backend.sent] == [target]
+    assert backend.sent[0]["raw"] == raw                       # the draft was not changed
+    assert backend.method_calls("drafts.update") == []
+    record = db.list_history()[0]
+    assert record.status == "already_attached" and record.send_status == "sent"
+    assert sender.run_once(folder, dry_run=False).kind == IDLE   # never twice
+    assert len(backend.sent) == 1
+
+
+def test_pdf_marked_already_attached_by_an_older_version_is_sent(sender, gmail, backend, folder, make_pdf, db):
+    from attachment_manager import AttachmentManager
+    from file_scanner import FileScanner
+    pdf_path = make_pdf("Amine_Haouam_Ausbildung_Gastronomie_Baumanns.pdf", age=30)
+    target, _raw = draft_with_pdf(backend, "Baumanns", pdf_path.read_bytes())
+    pdf = FileScanner(db, {"min_file_age_seconds": 0, "stability_check_seconds": 0}).check_single(pdf_path)
+    AttachmentManager(gmail, db).mark_already_attached(pdf, "Baumanns", gmail.get_draft_info(target))
+    assert sender.run_once(folder, dry_run=False).kind == SENT
+    assert [s["draft_id"] for s in backend.sent] == [target]
+
+
+def test_draft_with_a_different_pdf_of_the_same_name_is_not_sent(sender, backend, folder, make_pdf):
+    make_pdf("Amine_Haouam_Ausbildung_Gastronomie_Baumanns.pdf", age=30)
+    draft_with_pdf(backend, "Baumanns", ms.make_pdf_bytes("older version"))
+    result = sender.run_once(folder, dry_run=False)
+    assert result.kind == WAITING and "different attachment" in result.message
+    assert backend.sent == [] and backend.method_calls("drafts.update") == []
+
+
+def test_already_contained_pdf_in_dry_run_sends_nothing(sender, backend, folder, make_pdf):
+    pdf_path = make_pdf("Amine_Haouam_Ausbildung_Gastronomie_Baumanns.pdf", age=30)
+    draft_with_pdf(backend, "Baumanns", pdf_path.read_bytes())
+    result = sender.run_once(folder, dry_run=True)
+    assert result.kind == DRY_RUN and "WOULD be SENT" in result.message
+    assert backend.sent == []
+
+
+def test_batch_mixed_drafts_with_and_without_pdf(batch_sender, backend, folder, make_pdf):
+    knorr = draft(backend, f"Bewerbung um einen Ausbildungsplatz zum {RVG} (m/w/d)", "info@alte-muehle-hotel.com",
+                  body=skill_body(RVG, "Knorr"), age_s=600)
+    make_pdf("Amine_Haouam_Ausbildung_Gastronomie_Knorr.pdf", age=50)
+    tanne_pdf = make_pdf("Amine_Haouam_Ausbildung_Gastronomie_Tanne.pdf", age=40)
+    tanne, _raw = draft_with_pdf(backend, "Tanne", tanne_pdf.read_bytes(), age_s=300)
+    results = [batch_sender.run_once(folder, dry_run=False) for _ in range(2)]
+    assert [r.kind for r in results] == [SENT, SENT]
+    assert [s["draft_id"] for s in backend.sent] == [knorr, tanne]

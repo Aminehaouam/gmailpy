@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 
 APP_NAME = "Bewerbung Attach Assistant"
 APP_ID = "BewerbungAttachAssistant"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 
 # The only OAuth scope the application requests.
 #

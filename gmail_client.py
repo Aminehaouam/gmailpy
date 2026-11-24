@@ -526,6 +526,16 @@ def _token_has_required_scopes(info: dict[str, Any]) -> bool:
     return all(scope in scopes for scope in GMAIL_SCOPES)
 
 
+def refresh_failed_for_good(exc: RefreshError) -> bool:
+    """True when the saved sign-in itself is no longer valid (expired or
+    revoked); False for a temporary problem at Google or on the way there
+    (then the saved sign-in must be kept and simply tried again)."""
+    if getattr(exc, "retryable", False):
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in ("invalid_grant", "invalid_client", "unauthorized_client", "revoked"))
+
+
 def load_saved_credentials(token_store: TokenStore) -> Credentials | None:
     token_json = token_store.load()
     if not token_json:
@@ -566,7 +576,9 @@ def obtain_credentials(
             token_store.save(creds.to_json())
             log.info("OAuth access token refreshed")
             return creds
-        except RefreshError:
+        except RefreshError as exc:
+            if not refresh_failed_for_good(exc):
+                raise GmailNetworkError(f"Temporary problem refreshing the Gmail sign-in: {exc}") from exc
             # Refresh token expired (7 days for apps in "Testing" mode) or revoked.
             log.warning("OAuth refresh token expired or revoked - deleting stored token")
             token_store.delete()
@@ -712,6 +724,9 @@ class GmailClient:
         except ForbiddenOperationError:
             raise
         except RefreshError as exc:
+            if not refresh_failed_for_good(exc):
+                raise GmailNetworkError(
+                    f"Temporary problem refreshing the Gmail sign-in during {what}: {exc}") from exc
             raise GmailAuthError(
                 "Your Gmail authorization has expired or was revoked. "
                 "Click 'Connect Gmail' to sign in again."

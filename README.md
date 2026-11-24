@@ -55,7 +55,7 @@ attachment to an existing draft after you confirm it.
 | Never silently chooses between ambiguous drafts | If several drafts match, nothing is pre-selected; you must pick one. The newest draft is never preferred because it is the newest. |
 | Weak / uncertain matches never lead to an attachment | Partial names or similar spellings are shown for reference only. To use such a draft you must select it manually and confirm an extra warning. |
 | Keeps the draft's text, formatting and attachments | The complete original message is downloaded, one MIME part is added, and before uploading the new message is compared part-by-part with the original. Any difference aborts. After the upload the draft is read back and checked again. |
-| Detects duplicates | Every processed PDF is stored with its SHA-256 hash – renamed or moved copies are recognised. Before attaching, the draft is checked for the same file (by content and by name). |
+| Detects duplicates | Every processed PDF is stored with its SHA-256 hash – renamed or moved copies are recognised. Before attaching, the draft is checked for the same file (by content and by name). If the draft already contains exactly this PDF (e.g. it was created together with the PDF), automatic mode sends it as it is – nothing is attached twice. A different file with the same name is never replaced. |
 | One PDF per draft | A manual scan selects exactly one PDF. Automatic batch mode handles several new PDFs one after another, each only into the draft that clearly belongs to its company. |
 | Never modifies your local PDFs | Files are only read (to hash and attach them). |
 | Never asks for or stores your Gmail password | Sign-in uses Google's OAuth browser flow. The token is stored encrypted with Windows DPAPI. |
@@ -358,6 +358,16 @@ second**:
    drafts are looked at (`auto_recent_drafts`). In batch mode the
    next PDF follows right away; a PDF that cannot be sent yet does not hold
    up the others.
+
+**Drafts that already contain the PDF:** if the draft was created together
+with the PDF (byte-identical to the PDF in the folder), the app sends the
+draft as it is, without changing it.
+
+**Connection:** if Gmail cannot be reached (Windows just started, Wi-Fi not
+up yet, after sleep, a temporary problem at Google), automatic mode connects
+again by itself – every 10 seconds at first, at most every 2 minutes – and
+keeps the saved sign-in. Only if the sign-in really expired does the banner
+ask you to click *Connect Gmail*.
 
 **Speed:** about one second from saving the PDF to the sent e-mail. A PDF
 counts as completely saved as soon as it ends with the PDF end marker, keeps

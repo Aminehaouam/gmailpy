@@ -482,3 +482,44 @@ def test_batch_mode_can_be_switched_off(make_app, config):
     assert config.data["auto_batch"] is False
     from config import Config
     assert Config.load(config.paths).data["auto_batch"] is False
+
+
+def test_gmail_reconnects_by_itself_and_sends(make_app, backend, make_pdf, chimes, config):
+    """Gmail could not be reached (e.g. Windows just started, Wi-Fi not up
+    yet): automatic mode connects again by itself - no restart needed."""
+    from fakes import FakeGmailService
+    from gmail_client import GmailNetworkError
+    from secure_storage import TokenStore
+    TokenStore(config.paths.token_file).save("{}")             # a saved sign-in exists
+    target = backend.add_draft(ms.alternative_draft("Bewerbung - Trompetter GmbH", "bewerbung@trompetter.de"))
+    app, _script = make_app()
+    attempts = []
+
+    def flaky_factory(paths, token_store, **kwargs):
+        attempts.append(kwargs["interactive"])
+        if len(attempts) == 1:
+            raise GmailNetworkError("Network error: no connection")
+        return GmailClient(FakeGmailService(backend), account_email=backend.account, num_retries=0)
+
+    app.gmail_factory = flaky_factory
+    enable_auto(app, send=True, live=True)
+    make_pdf("Amine_Haouam_Ausbildung_Elektroniker_Trompetter.pdf", age=30)
+    app._reconnect_at = 0
+    auto_tick(app)                                            # offline: not connected
+    assert app.gmail is None and "connecting again automatically" in app.banner.cget("text")
+    app._reconnect_at = 0
+    auto_tick(app)                                            # online again: connected
+    assert app.gmail is not None
+    auto_tick(app)                                            # ... and the e-mail goes out
+    assert [s["draft_id"] for s in backend.sent] == [target] and chimes == [True]
+    assert attempts == [False, False]                         # never a browser sign-in
+
+
+def test_no_reconnect_without_saved_sign_in(make_app, config):
+    app, _script = make_app()
+    calls = []
+    app.gmail_factory = lambda *a, **k: calls.append(k) or None
+    enable_auto(app, send=False, live=True)
+    app._reconnect_at = 0
+    auto_tick(app)
+    assert calls == [] and "Gmail sign-in needed" in app.banner.cget("text")

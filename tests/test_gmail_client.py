@@ -371,3 +371,42 @@ def test_log_filter_redacts_records():
     record = logging.LogRecord("t", logging.INFO, __file__, 1, "token %s", ("ya29.secret-value",), None)
     SecretRedactingFilter().filter(record)
     assert "secret-value" not in record.getMessage()
+
+
+def test_temporary_refresh_problem_keeps_the_saved_sign_in(paths, tmp_path, monkeypatch):
+    """A temporary problem at Google (or right after the PC wakes up) must not
+    delete the saved sign-in - the app simply tries again."""
+    from google.auth.exceptions import RefreshError
+    from google.oauth2.credentials import Credentials
+    from gmail_client import GmailNetworkError
+
+    def refresh_fails(self, request):
+        raise RefreshError("internal_failure: try again later", retryable=True)
+
+    monkeypatch.setattr(Credentials, "refresh", refresh_fails)
+    store = TokenStore(tmp_path / "token.bin")
+    store.save(token_json(expired=True))
+    with pytest.raises(GmailNetworkError):
+        obtain_credentials(paths, store, interactive=False)
+    assert store.exists()
+
+
+def test_refresh_errors_during_requests_are_classified():
+    from google.auth.exceptions import RefreshError
+    from gmail_client import GmailNetworkError
+
+    class Failing:
+        def __init__(self, exc):
+            self.exc = exc
+
+        def execute(self, num_retries=0):
+            raise self.exc
+
+    from fakes import FakeGmailBackend, FakeGmailService
+    client = GmailClient(FakeGmailService(FakeGmailBackend()), num_retries=0)
+    with pytest.raises(GmailNetworkError):
+        client._execute(Failing(RefreshError("connection reset", retryable=True)), "list drafts")
+    with pytest.raises(GmailNetworkError):
+        client._execute(Failing(RefreshError("server_error")), "list drafts")
+    with pytest.raises(GmailAuthError):
+        client._execute(Failing(RefreshError("invalid_grant: Token has been expired or revoked.")), "list drafts")

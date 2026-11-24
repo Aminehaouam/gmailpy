@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from attachment_manager import AttachError, AttachmentManager, DuplicateAttachmentError
-from database import Database, STATUS_DRY_RUN, STATUS_FAILED, STATUS_SUCCESS
+from database import Database, STATUS_ALREADY_ATTACHED, STATUS_DRY_RUN, STATUS_FAILED, STATUS_SUCCESS
 from file_scanner import FileScanner, PdfFile, sha256_of_file
 from filename_parser import FilenameParser
 from gmail_client import DraftInfo, GmailAuthError, GmailClient, GmailError
@@ -269,7 +269,7 @@ class AutoSender:
             except OSError:
                 pending.append((path, st, None))      # still being saved
                 continue
-            if self.db.find_blocking_record(sha) is None:
+            if self._still_to_send(sha):
                 pending.append((path, st, sha))
         if not pending:
             self._maybe_prefetch()
@@ -292,6 +292,14 @@ class AutoSender:
             result.details["more"] = len(pending) > 1
             return result
         return self._summary(waiting, latest_path.name)
+
+    def _still_to_send(self, sha: str) -> bool:
+        """Not processed yet - or only found already attached in its draft
+        and never sent (older versions stopped there)."""
+        record = self.db.find_blocking_record(sha)
+        if record is None:
+            return True
+        return record.status == STATUS_ALREADY_ATTACHED and not record.send_status
 
     def _summary(self, waiting: list[AutoResult], latest_name: str) -> AutoResult:
         """One result for the banner: the latest PDF's, and how many wait.
@@ -368,16 +376,24 @@ class AutoSender:
         except GmailAuthError as exc:
             return AutoResult(AUTH, str(exc), path.name, retry_in=30)
         except DuplicateAttachmentError as exc:
-            if exc.exact_duplicate:
-                self.manager.mark_already_attached(pdf, company, draft)
-                return AutoResult(PROBLEM, f"{path.name}: {exc} Not sent automatically.", path.name,
-                                  draft.subject)
-            return self._wait(sha, path.name, str(exc), retry_in=60)
+            if not exc.exact_duplicate:
+                return self._wait(sha, path.name, f"not sent: {exc}", retry_in=60, draft_subject=draft.subject)
+            # The draft already contains exactly this PDF (e.g. it was created
+            # together with the PDF): send it as it is.
+            log.info("Automatic: %s is already in draft '%s' (%s) - sending it as it is",
+                     path.name, draft.subject, reason)
+            result = self.manager.send_already_attached(pdf, company, draft, dry_run=dry_run,
+                                                        confirmed_at=state.get("listed_at"))
+            return self._finish(sha, path, draft, result)
         except (AttachError, GmailError) as exc:
             return self._wait(sha, path.name, f"problem: {exc}", retry_in=30)
 
         log.info("Automatic: %s -> draft '%s' (%s)", path.name, draft.subject, reason)
         result = self.manager.execute(plan, dry_run=dry_run, send=True)
+        return self._finish(sha, path, draft, result)
+
+    def _finish(self, sha: str, path: Path, draft: DraftInfo, result) -> AutoResult:
+        """AutoResult for the outcome of attaching/sending one PDF."""
         self._next_try.pop(sha, None)
         self._last.pop(sha, None)
         if result.status == STATUS_DRY_RUN:
@@ -386,7 +402,7 @@ class AutoSender:
         if result.status == STATUS_SUCCESS and result.sent:
             return AutoResult(SENT, result.message, path.name, draft.subject)
         if result.status == STATUS_FAILED:
-            return self._wait(sha, path.name, f"not attached: {result.message}", retry_in=30)
+            return self._wait(sha, path.name, f"not sent yet: {result.message}", retry_in=30)
         return AutoResult(PROBLEM, result.message, path.name, draft.subject)
 
 

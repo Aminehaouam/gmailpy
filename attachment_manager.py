@@ -420,47 +420,83 @@ class AttachmentManager:
             )
         result = self._attach(plan)
         if send and result.success:
-            result = self._send(plan, result)
+            result = self._send(plan.pdf, plan.draft, result)
         return result
 
-    def _send(self, plan: AttachPlan, attached: AttachResult) -> AttachResult:
-        """Send the draft after a verified attachment.  Never retried."""
+    def send_already_attached(self, pdf: PdfFile, company: str, draft: DraftInfo, *, dry_run: bool,
+                              confirmed_at: float | None = None) -> AttachResult:
+        """The draft already contains exactly this PDF (same SHA-256, e.g. the
+        draft was created together with the PDF): send it as it is - nothing
+        in the draft is changed.  Same rules as after attaching: recipient
+        required, never twice, never retried."""
+        if dry_run:
+            record_id = self.db.start_operation(
+                pdf_filename=pdf.name, pdf_path=str(pdf.path), sha256=pdf.sha256,
+                file_size=pdf.size, file_mtime=pdf.mtime, company_name=company,
+                draft_id=draft.draft_id, draft_message_id=draft.message_id,
+                draft_subject=draft.subject, draft_recipients=draft.recipients_display(),
+                status=STATUS_DRY_RUN, finished=True, error_message="Dry run - Gmail was not modified.",
+            )
+            return AttachResult(
+                STATUS_DRY_RUN,
+                f"Dry run complete: '{pdf.name}' is already in the draft '{draft.subject or '(no subject)'}' "
+                f"({draft.recipients_display()}); the e-mail WOULD be SENT as it is. Nothing was sent.",
+                record_id,
+            )
+        try:
+            self._read_pdf(pdf)                       # the file is still exactly this PDF
+            fresh = confirmed_at is not None and time.monotonic() - confirmed_at <= FRESH_CONFIRMATION_SECONDS
+            if not fresh and self.gmail.get_draft_message_id(draft.draft_id) != draft.message_id:
+                raise DraftChangedError("The draft was changed in Gmail meanwhile. Nothing was sent.")
+        except (AttachError, GmailError) as exc:
+            return AttachResult(STATUS_FAILED, str(exc))
+        record_id = self.mark_already_attached(pdf, company, draft)
+        return self._send(pdf, draft, AttachResult(STATUS_SUCCESS, "", record_id), already_attached=True)
+
+    def _send(self, pdf: PdfFile, draft: DraftInfo, attached: AttachResult, *,
+              already_attached: bool = False) -> AttachResult:
+        """Send the draft after a verified attachment (or when it already
+        contains exactly this PDF).  Never retried."""
         record_id = attached.record_id
-        recipients = plan.draft.recipients_display()
+        recipients = draft.recipients_display()
+        lead = "The PDF is in the draft" if already_attached else "The PDF was attached"
 
         def done(status: str, message: str, message_id: str | None = None, note: str | None = None) -> AttachResult:
             self.db.set_send_result(record_id, status, message_id=message_id, note=note or message)
             return AttachResult(STATUS_SUCCESS, message, record_id, attached.new_message_id, status)
 
-        if not plan.draft.to:
-            return done(SEND_FAILED, "The PDF was attached, but the draft has no recipient, so it was "
+        if not draft.to:
+            return done(SEND_FAILED, f"{lead}, but the draft has no recipient, so it was "
                                      "NOT sent. Add the recipient in Gmail and send it yourself.")
-        if self.db.was_sent(plan.pdf.sha256):
-            return done(SEND_FAILED, "The PDF was attached, but an e-mail with this exact PDF was already "
+        if self.db.was_sent(pdf.sha256):
+            return done(SEND_FAILED, f"{lead}, but an e-mail with this exact PDF was already "
                                      "sent before, so it was NOT sent again.")
         try:
-            response = self.gmail.send_draft(plan.draft.draft_id)
+            response = self.gmail.send_draft(draft.draft_id)
         except GmailNetworkError as exc:
-            return done(SEND_UNKNOWN, f"The PDF was attached, but the connection broke while sending "
+            return done(SEND_UNKNOWN, f"{lead}, but the connection broke while sending "
                                       f"({exc}). Check your Gmail 'Sent' folder - the app does NOT retry, "
                                       "to avoid sending the application twice.")
         except GmailApiError as exc:
             if exc.status is not None and exc.status >= 500:
-                return done(SEND_UNKNOWN, f"The PDF was attached, but Gmail reported a server error while "
+                return done(SEND_UNKNOWN, f"{lead}, but Gmail reported a server error while "
                                           f"sending ({exc}). Check your 'Sent' folder - not retried.")
-            return done(SEND_FAILED, f"The PDF was attached, but Gmail refused to send it ({exc}). "
+            return done(SEND_FAILED, f"{lead}, but Gmail refused to send it ({exc}). "
                                      "The draft with the PDF is still in Gmail - send it yourself.")
         except GmailError as exc:
-            return done(SEND_FAILED, f"The PDF was attached, but sending failed ({exc}). "
+            return done(SEND_FAILED, f"{lead}, but sending failed ({exc}). "
                                      "The draft with the PDF is still in Gmail - send it yourself.")
         except Exception as exc:  # unexpected: we cannot know whether it was sent
             log.exception("Unexpected error while sending draft")
-            return done(SEND_UNKNOWN, f"The PDF was attached, but an unexpected error occurred while "
+            return done(SEND_UNKNOWN, f"{lead}, but an unexpected error occurred while "
                                       f"sending ({exc}). Check your 'Sent' folder - not retried.")
         message_id = response.get("id")
-        return done(SEND_SENT, f"Attached '{plan.pdf.name}' and SENT the e-mail "
-                               f"'{plan.draft.subject or '(no subject)'}' to {recipients}.",
-                    message_id=message_id, note="E-mail sent.")
+        subject = draft.subject or "(no subject)"
+        if already_attached:
+            text = f"SENT the e-mail '{subject}' to {recipients} ('{pdf.name}' was already in the draft)."
+        else:
+            text = f"Attached '{pdf.name}' and SENT the e-mail '{subject}' to {recipients}."
+        return done(SEND_SENT, text, message_id=message_id, note="E-mail sent.")
 
     def _attach(self, plan: AttachPlan) -> AttachResult:
         """Attach the PDF to the draft (no sending)."""
